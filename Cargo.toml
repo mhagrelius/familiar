@@ -1,0 +1,60 @@
+[package]
+name = "familiar"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A local-model assistant for the GNOME desktop"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "familiar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "familiar"
+path = "src/main.rs"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+gio = { version = "0.22", features = ["v2_80"] }
+# The platform's HTTP client. It ships in org.gnome.Sdk and its async calls
+# complete on the GLib main loop, so a streamed turn is a `spawn_future_local`
+# reading an InputStream — no tokio, no channel, no worker thread. Needs
+# `libsoup-3.0-dev` to build; nothing extra for Flatpak.
+soup = { package = "soup3", version = "0.9" }
+# Cairo and Pango are already linked into the process — GTK paints every widget
+# through them — and both ship in org.gnome.Sdk. `cairo::PdfSurface` plus a
+# Pango layout is therefore a PDF writer that costs nothing at runtime and
+# nothing at packaging, works headless and offline, and consumes the same block
+# spec the .docx writer does, so the two outputs of one document agree. The
+# alternatives all wanted a second runtime outside the sandbox: LibreOffice is
+# ~800 MB and, being a Flatpak itself, would need `flatpak-spawn --host`;
+# weasyprint wants Python; pandoc wants TeX for anything worth printing.
+# `v1_16` is what gates `PdfSurface::set_metadata`, so a generated PDF carries a
+# real title rather than showing its file name in every reader's tab. Cairo 1.16
+# is from 2018 and long predates the runtime this ships against.
+cairo = { package = "cairo-rs", version = "0.22", features = ["pdf", "v1_16"] }
+pango = "0.22"
+pangocairo = "0.22"
+# Brain's vault and Markdown scanner. Familiar reads and writes the same notes,
+# and two implementations of a file format are two implementations that can
+# disagree — the failure mode being a mangled note. Only `brain::model` is used;
+# the crate's `ui` half comes along for the ride until Brain gains a feature to
+# gate it. Pinned, because a vault format should not change under us silently.
+brain = { git = "https://github.com/mhagrelius/brain", rev = "52288a939cd735d24c0c09c300fa96cbed3f6e0c" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Timestamps on turns and threads, and the volatile date line in the prompt.
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+    "serde",
+] }
+
+# Rendering a dropped PDF needs somewhere to put the pages. A dev-dependency
+# would not do: the composer uses it.
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"

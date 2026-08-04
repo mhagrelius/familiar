@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Familiar. Keep this comment short: gdk-pixbuf sniffs only the first ~256
+     bytes to decide a file is SVG, so a long header pushes <svg> out of the
+     window and the icon silently fails to load. Rationale is below the tag. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- A speech bubble with a small companion inside it: the app is a
+       conversation, and the thing you are conversing with is yours and sits
+       close by. The palette is Brain's, because they share a vault. -->
+  <defs>
+    <linearGradient id="bubble" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eceff4"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8ab4f8"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The bubble, with a tail so it reads as speech rather than a card -->
+  <path d="M22 14h84a14 14 0 0 1 14 14v54a14 14 0 0 1-14 14H56l-24 20v-20h-10a14 14 0 0 1-14-14V28a14 14 0 0 1 14-14z"
+        fill="url(#bubble)"/>
+  <path d="M22 14h84a14 14 0 0 1 14 14v54a14 14 0 0 1-14 14H56l-24 20v-20h-10a14 14 0 0 1-14-14V28a14 14 0 0 1 14-14z"
+        fill="none" stroke="#c8cfdb" stroke-width="2"/>
+
+  <!-- The familiar. Ears are drawn first so the head's curve overlaps their
+       base: drawn after, they read as two triangles stuck behind a circle. -->
+  <path d="M45 44 43 22l20 13z" fill="url(#mark)"/>
+  <path d="M83 44 85 22 65 35z" fill="url(#mark)"/>
+  <path d="M64 32c15 0 25 11 25 26s-10 24-25 24-25-8-25-24 10-26 25-26z" fill="url(#mark)"/>
+  <circle cx="55" cy="56" r="4.5" fill="#ffffff"/>
+  <circle cx="73" cy="56" r="4.5" fill="#ffffff"/>
+</svg>

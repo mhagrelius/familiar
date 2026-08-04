@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Familiar — prompt eval</title>
+<style>
+  :root {
+    --bg: #fbfaf9;
+    --panel: #ffffff;
+    --ink: #1b1a19;
+    --soft: #6b6763;
+    --line: #e6e2dd;
+    --pass: #2f7d4f;
+    --pass-bg: #e8f4ec;
+    --fail: #b3261e;
+    --fail-bg: #fcebea;
+    --warn: #8a6100;
+    --warn-bg: #fdf3e0;
+    --accent: #3b5bdb;
+    --accent-bg: #eef1fd;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17161a;
+      --panel: #201f24;
+      --ink: #eceaea;
+      --soft: #a29d9d;
+      --line: #333138;
+      --pass: #7bd1a0;
+      --pass-bg: #1c2f25;
+      --fail: #f29089;
+      --fail-bg: #33201f;
+      --warn: #e0b563;
+      --warn-bg: #302614;
+      --accent: #9db2f7;
+      --accent-bg: #21263c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 -apple-system, "Inter", "Segoe UI", Cantarell, system-ui, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 96px; }
+
+  header h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  header .sub { color: var(--soft); font-size: 14px; margin-bottom: 20px; }
+  .headline {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; margin-bottom: 20px;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 16px; min-width: 116px;
+  }
+  .stat .n { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+  .stat .l { color: var(--soft); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    position: sticky; top: 0; z-index: 5;
+    background: var(--bg); padding: 12px 0; border-bottom: 1px solid var(--line); margin-bottom: 16px;
+  }
+  input[type=search] {
+    flex: 1 1 240px; min-width: 200px; padding: 9px 12px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit;
+  }
+  .chip {
+    border: 1px solid var(--line); background: var(--panel); color: var(--soft);
+    padding: 8px 12px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .chip[aria-pressed="true"] { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .chip:hover { border-color: var(--accent); }
+
+  h2.family {
+    display: flex; align-items: baseline; gap: 10px;
+    font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--soft); margin: 28px 0 10px; font-weight: 600;
+  }
+  h2.family .score { color: var(--ink); font-size: 14px; letter-spacing: 0; text-transform: none; }
+  .bar { flex: 1; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; max-width: 180px; }
+  .bar i { display: block; height: 100%; background: var(--pass); }
+
+  details.sc {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    margin-bottom: 8px; overflow: hidden;
+  }
+  details.sc[open] { border-color: var(--accent); }
+  summary { cursor: pointer; padding: 12px 16px; display: flex; gap: 12px; align-items: center; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸"; color: var(--soft); font-size: 12px; transition: transform .12s; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  .nm { font-family: var(--mono); font-size: 13px; }
+  .ab { color: var(--soft); font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pct.ok { color: var(--pass); }
+  .pct.bad { color: var(--fail); }
+  .pct.mid { color: var(--warn); }
+  .tag {
+    font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .tag.flaky { background: var(--warn-bg); color: var(--warn); }
+  .tag.note { background: var(--accent-bg); color: var(--accent); }
+  .tag.unmeasured { background: var(--fail-bg); color: var(--fail); }
+
+  .body { padding: 4px 16px 16px; border-top: 1px solid var(--line); }
+  .lbl {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--soft); font-weight: 600; margin: 16px 0 6px;
+  }
+  .tools { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tool { font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 5px; background: var(--accent-bg); color: var(--accent); }
+
+  .ask { border-left: 3px solid var(--line); padding: 2px 0 2px 12px; margin-bottom: 12px; }
+  .ask .said { font-style: italic; margin-bottom: 6px; }
+  ul.checks { list-style: none; margin: 0; padding: 0; }
+  ul.checks li { font-family: var(--mono); font-size: 12.5px; padding: 2px 0 2px 20px; position: relative; }
+  ul.checks li::before { position: absolute; left: 0; font-family: inherit; }
+  li.p::before { content: "✓"; color: var(--pass); }
+  li.f::before { content: "✗"; color: var(--fail); }
+  li.u::before { content: "•"; color: var(--soft); }
+  li.f { color: var(--fail); }
+  li .why { color: var(--soft); font-style: italic; }
+  li .count { color: var(--soft); font-family: inherit; }
+
+  .runs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .runbtn {
+    border: 1px solid var(--line); background: var(--panel); color: var(--soft);
+    width: 30px; height: 30px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+  }
+  .runbtn.ok { color: var(--pass); border-color: var(--pass); }
+  .runbtn.bad { color: var(--fail); border-color: var(--fail); }
+  .runbtn[aria-pressed="true"] { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+
+  .trace { background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 12px; }
+  .turn + .turn { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .you { font-style: italic; margin-bottom: 8px; }
+  .call { font-family: var(--mono); font-size: 12px; margin: 3px 0; }
+  .call .arrow { color: var(--soft); }
+  .call.failed .arrow { color: var(--fail); }
+  .call.denied .arrow { color: var(--warn); }
+  .call .args { color: var(--soft); word-break: break-all; }
+  .call .gate {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+    padding: 1px 5px; border-radius: 4px; background: var(--warn-bg); color: var(--warn);
+  }
+  .call details { margin: 2px 0 6px 16px; }
+  .call summary { color: var(--soft); cursor: pointer; font-size: 11px; list-style: none; }
+  .call summary::-webkit-details-marker { display: none; }
+  .call summary::before { content: "▸ "; }
+  .call details[open] summary::before { content: "▾ "; }
+  .call .result {
+    white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--soft);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 7px;
+    padding: 8px 10px; margin-top: 4px; max-height: 320px; overflow: auto;
+  }
+  .answer { white-space: pre-wrap; margin-top: 8px; font-size: 14px; }
+  .answer.empty { color: var(--fail); font-style: italic; }
+  .flaws { margin-top: 8px; }
+  .flaw { font-size: 12px; color: var(--warn); }
+
+  textarea {
+    width: 100%; min-height: 62px; padding: 9px 11px; border-radius: 9px; resize: vertical;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; font-size: 13.5px;
+  }
+  textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .hasnote { border-left: 3px solid var(--accent); }
+  .empty-state { color: var(--soft); text-align: center; padding: 48px 0; }
+  button.primary {
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    padding: 8px 14px; border-radius: 9px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 600;
+  }
+  dialog {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink);
+    max-width: 720px; width: 90%; padding: 20px;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog textarea { min-height: 320px; font-family: var(--mono); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Familiar — prompt eval</h1>
+    <div class="sub" id="sub"></div>
+    <div class="headline" id="headline"></div>
+  </header>
+
+  <div class="controls">
+    <input type="search" id="q" placeholder="Search scenarios, expectations, answers…" autocomplete="off">
+    <button class="chip" id="f-all" aria-pressed="true">All</button>
+    <button class="chip" id="f-imperfect" aria-pressed="false">Not 100%</button>
+    <button class="chip" id="f-failing" aria-pressed="false">Has a failure</button>
+    <button class="chip" id="f-noted" aria-pressed="false">Noted</button>
+    <button class="chip" id="expand">Expand all</button>
+    <button class="primary" id="export">Copy my notes</button>
+  </div>
+
+  <main id="out"></main>
+</div>
+
+<dialog id="notes">
+  <h3 style="margin-top:0">Notes to hand back</h3>
+  <p style="color:var(--soft);font-size:13px">Select all and copy. Each entry names the scenario so it can be found in the suite.</p>
+  <textarea id="notesText" readonly></textarea>
+  <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+    <button class="chip" onclick="document.getElementById('notes').close()">Close</button>
+    <button class="primary" id="copyNotes">Copy</button>
+  </div>
+</dialog>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const REPORT = JSON.parse(document.getElementById("data").textContent);
+const KEY = "familiar-eval-notes:" + (REPORT.label || "run");
+const notes = JSON.parse(localStorage.getItem(KEY) || "{}");
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+// A run the server never finished is not a zero — it is not a measurement, and
+// the score has to leave it out or a dead server reads as a prompt regression.
+const scored = s => s.runs.filter(r => !r.broken);
+const totals = s => scored(s).reduce((a, r) => [a[0] + r.passed, a[1] + r.total], [0, 0]);
+const rate = s => { const [p, t] = totals(s); return t ? p / t : null; };
+const flaky = s => { const r = scored(s); return r.length > 1 && r.some(x => x.passed === x.total) && r.some(x => x.passed !== x.total); };
+const pctClass = v => v === null ? "" : v >= 0.999 ? "ok" : v >= 0.85 ? "mid" : "bad";
+const pctText = v => v === null ? "—" : Math.round(v * 100) + "%";
+
+// How often each expectation failed, so the reviewer sees "3 of 6" rather than
+// having to open every run to find out whether it is systematic or a wobble.
+function checkTally(s) {
+  const tally = new Map();
+  for (const run of scored(s)) {
+    for (const v of (run.verdicts || [])) {
+      const at = tally.get(v.check) || { passed: 0, failed: 0, why: new Set() };
+      v.passed ? at.passed++ : (at.failed++, v.detail && at.why.add(v.detail));
+      tally.set(v.check, at);
+    }
+  }
+  return tally;
+}
+
+function summaryStats() {
+  const all = REPORT.scenarios;
+  const [p, t] = all.reduce((a, s) => { const [x, y] = totals(s); return [a[0] + x, a[1] + y]; }, [0, 0]);
+  const broken = all.reduce((n, s) => n + s.runs.filter(r => r.broken).length, 0);
+  return [
+    ["checks passed", t ? Math.round(p / t * 100) + "%" : "—", `${p} of ${t}`],
+    ["scenarios", all.length, `${REPORT.repeats} run(s) each`],
+    ["not 100%", all.filter(s => (rate(s) ?? 1) < 0.999).length, "worth a look"],
+    ["flaky", all.filter(flaky).length, "passed sometimes"],
+    ...(broken ? [["unmeasured", broken, "server never finished"]] : []),
+  ];
+}
+
+function render() {
+  document.getElementById("sub").textContent =
+    [REPORT.label, REPORT.model, REPORT.compaction ? "compaction: " + REPORT.compaction : null]
+      .filter(Boolean).join(" · ");
+  document.getElementById("headline").innerHTML = summaryStats()
+    .map(([l, n, s]) => `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div><div class="l" style="text-transform:none;letter-spacing:0">${esc(s)}</div></div>`)
+    .join("");
+  draw();
+}
+
+function matches(s, q) {
+  if (!q) return true;
+  const hay = [s.name, s.about, ...(s.tools || []),
+    ...(s.asks || []).flatMap(a => [a.user, ...(a.checks || [])]),
+    ...s.runs.flatMap(r => (r.steps || []).flatMap(st => [st.answer, st.preamble, ...(st.calls || []).map(c => c.name + " " + c.arguments)]))
+  ].join(" ").toLowerCase();
+  return hay.includes(q);
+}
+
+function draw() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const mode = ["all", "imperfect", "failing", "noted"].find(m => document.getElementById("f-" + m).getAttribute("aria-pressed") === "true") || "all";
+  const shown = REPORT.scenarios.filter(s => {
+    if (!matches(s, q)) return false;
+    if (mode === "imperfect") return (rate(s) ?? 1) < 0.999;
+    if (mode === "failing") return scored(s).some(r => r.failures && r.failures.length);
+    if (mode === "noted") return !!(notes[s.name] || "").trim();
+    return true;
+  });
+
+  const families = [...new Set(shown.map(s => s.name.split("/")[0]))];
+  const out = document.getElementById("out");
+  if (!shown.length) { out.innerHTML = `<div class="empty-state">Nothing matches.</div>`; return; }
+
+  out.innerHTML = families.map(f => {
+    const list = shown.filter(s => s.name.split("/")[0] === f);
+    const [p, t] = list.reduce((a, s) => { const [x, y] = totals(s); return [a[0] + x, a[1] + y]; }, [0, 0]);
+    const v = t ? p / t : null;
+    return `<h2 class="family"><span>${esc(f)}</span>
+      <span class="bar"><i style="width:${Math.round((v ?? 0) * 100)}%"></i></span>
+      <span class="score ${pctClass(v)}">${pctText(v)}</span></h2>` + list.map(card).join("");
+  }).join("");
+}
+
+function card(s) {
+  const v = rate(s);
+  const note = (notes[s.name] || "").trim();
+  const tags = [
+    flaky(s) ? `<span class="tag flaky">flaky</span>` : "",
+    s.runs.every(r => r.broken) ? `<span class="tag unmeasured">unmeasured</span>` : "",
+    note ? `<span class="tag note">noted</span>` : "",
+  ].join("");
+  return `<details class="sc${note ? " hasnote" : ""}" data-name="${esc(s.name)}">
+    <summary>
+      <span class="nm">${esc(s.name)}</span>
+      <span class="ab">${esc(s.about)}</span>
+      ${tags}
+      <span class="pct ${pctClass(v)}">${pctText(v)}</span>
+    </summary>
+    <div class="body">${bodyFor(s)}</div>
+  </details>`;
+}
+
+function bodyFor(s) {
+  const tally = checkTally(s);
+  const runs = s.runs.length;
+
+  const asks = (s.asks || []).map((a, i) => {
+    const checks = (a.checks || []).map(c => {
+      const at = tally.get(c);
+      if (!at) return `<li class="u">${esc(c)}</li>`;
+      const cls = at.failed === 0 ? "p" : "f";
+      const why = [...at.why].slice(0, 3).map(w => `<div class="why">${esc(w)}</div>`).join("");
+      const count = at.failed ? ` <span class="count">— failed ${at.failed} of ${at.passed + at.failed}</span>` : "";
+      return `<li class="${cls}">${esc(c)}${count}${why}</li>`;
+    }).join("");
+    const heading = a.user
+      ? `<div class="said">“${esc(a.user)}”</div>`
+      : `<div class="said" style="font-style:normal;color:var(--soft)">Over the whole conversation</div>`;
+    return `<div class="ask">${heading}<ul class="checks">${checks}</ul></div>`;
+  }).join("");
+
+  return `
+    ${(s.tools || []).length ? `<div class="lbl">Switched on</div><div class="tools">${s.tools.map(t => `<span class="tool">${esc(t)}</span>`).join("")}</div>` : ""}
+    <div class="lbl">What is asked, and what is expected of it</div>
+    ${asks || `<div style="color:var(--soft)">No expectations recorded.</div>`}
+    <div class="lbl">What the model did</div>
+    <div class="runs">${s.runs.map((r, i) =>
+      `<button class="runbtn ${r.broken ? "" : r.passed === r.total ? "ok" : "bad"}" data-run="${i}" aria-pressed="${i === firstInteresting(s)}">${i + 1}</button>`).join("")}</div>
+    <div class="trace" data-trace>${traceFor(s, firstInteresting(s))}</div>
+    <div class="lbl">Your note${runs > 1 ? "" : ""}</div>
+    <textarea data-note placeholder="Disagree with an expectation? Say what it should be instead — this is kept in your browser and comes out of “Copy my notes”.">${esc(notes[s.name] || "")}</textarea>
+  `;
+}
+
+// Open on the first run that failed, because that is the one being reviewed.
+// Landing on a passing run and making somebody click through to find the
+// failure is how a report goes unread.
+function firstInteresting(s) {
+  const at = s.runs.findIndex(r => !r.broken && r.passed !== r.total);
+  return at === -1 ? 0 : at;
+}
+
+function traceFor(s, i) {
+  const run = s.runs[i];
+  if (!run) return "";
+  if (run.broken) return `<div class="answer empty">The server never finished this run: ${esc(run.broken)}</div>`;
+  const steps = run.steps || [];
+  if (!steps.length) return `<div style="color:var(--soft)">No trace was recorded for this run.</div>`;
+
+  const turns = steps.map(st => {
+    const calls = (st.calls || []).map(c => {
+      // What the harness handed back. Folded away by default because most of
+      // the time the question is which tool it reached for — and open in one
+      // click when the question is whether the answer it got was any good.
+      const back = c.result
+        ? `<details><summary>what came back — ${c.result.length} characters</summary><div class="result">${esc(c.result)}</div></details>`
+        : "";
+      // The app would have put a dialog on screen here. The harness approves
+      // everything, so without this a gated call looks unattended.
+      const gate = c.gated
+        ? ` <span class="gate" title="the application stops for the user's approval before running this">approved</span>`
+        : "";
+      return `<div class="call ${esc(c.reaction)}"><span class="arrow">${c.reaction === "failed" ? "✗" : c.reaction === "denied" ? "⊘" : "→"}</span> ${esc(c.name)}<span class="args">(${esc(c.arguments)})</span>${gate}${back}</div>`;
+    }).join("");
+    const said = st.answer && st.answer.trim()
+      ? `<div class="answer">${esc(st.answer)}</div>`
+      : `<div class="answer empty">— it answered with nothing —</div>`;
+    return `<div class="turn">
+      ${st.user ? `<div class="you">“${esc(st.user)}”</div>` : ""}
+      ${st.preamble ? `<div class="answer" style="color:var(--soft)">${esc(st.preamble)}</div>` : ""}
+      ${calls}${said}</div>`;
+  }).join("");
+
+  const failed = (run.failures || []).map(f =>
+    `<li class="f">${esc(f.check)}${f.detail ? `<div class="why">${esc(f.detail)}</div>` : ""}</li>`).join("");
+  const flaws = (run.flaws || []).map(f =>
+    `<div class="flaw">! ${esc(f.kind)}${f.detail ? " — " + esc(f.detail) : ""}</div>`).join("");
+
+  return turns
+    + (failed ? `<div class="lbl">Failed here</div><ul class="checks">${failed}</ul>` : "")
+    + (flaws ? `<div class="flaws">${flaws}</div>` : "");
+}
+
+// -- wiring -------------------------------------------------------------------
+
+document.getElementById("q").addEventListener("input", draw);
+for (const m of ["all", "imperfect", "failing", "noted"]) {
+  document.getElementById("f-" + m).addEventListener("click", () => {
+    for (const o of ["all", "imperfect", "failing", "noted"])
+      document.getElementById("f-" + o).setAttribute("aria-pressed", String(o === m));
+    draw();
+  });
+}
+document.getElementById("expand").addEventListener("click", e => {
+  const open = e.target.textContent === "Expand all";
+  document.querySelectorAll("details.sc").forEach(d => { d.open = open; });
+  e.target.textContent = open ? "Collapse all" : "Expand all";
+});
+
+document.addEventListener("click", e => {
+  const btn = e.target.closest(".runbtn");
+  if (!btn) return;
+  const card = btn.closest("details.sc");
+  const s = REPORT.scenarios.find(x => x.name === card.dataset.name);
+  card.querySelectorAll(".runbtn").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+  card.querySelector("[data-trace]").innerHTML = traceFor(s, Number(btn.dataset.run));
+});
+
+document.addEventListener("input", e => {
+  if (!e.target.matches("[data-note]")) return;
+  const card = e.target.closest("details.sc");
+  const name = card.dataset.name;
+  const text = e.target.value;
+  text.trim() ? notes[name] = text : delete notes[name];
+  localStorage.setItem(KEY, JSON.stringify(notes));
+  card.classList.toggle("hasnote", !!text.trim());
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  const entries = Object.entries(notes).filter(([, v]) => v.trim());
+  const text = entries.length
+    ? `# Eval notes — ${REPORT.label}${REPORT.model ? " (" + REPORT.model + ")" : ""}\n\n`
+      + entries.map(([name, note]) => {
+          const s = REPORT.scenarios.find(x => x.name === name);
+          return `## ${name}\n${s ? `_${s.about}_\nScored ${pctText(rate(s))}.\n` : ""}\n${note.trim()}\n`;
+        }).join("\n")
+    : "No notes yet — type in the box under any scenario.";
+  const box = document.getElementById("notesText");
+  box.value = text;
+  document.getElementById("notes").showModal();
+  box.select();
+});
+document.getElementById("copyNotes").addEventListener("click", async () => {
+  const box = document.getElementById("notesText");
+  box.select();
+  try { await navigator.clipboard.writeText(box.value); } catch { document.execCommand("copy"); }
+  document.getElementById("copyNotes").textContent = "Copied";
+  setTimeout(() => { document.getElementById("copyNotes").textContent = "Copy"; }, 1200);
+});
+
+render();
+</script>
+</body>
+</html>

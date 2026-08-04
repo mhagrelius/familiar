@@ -1,0 +1,124 @@
+/* Colours come from Adwaita's variables, never hex: the theme has a meaning
+   for each of these and a high-contrast or accent-recoloured session has to
+   keep working. */
+
+.turn-question {
+  padding: 12px 14px;
+  background-color: var(--card-bg-color);
+}
+
+/* The answer is a GtkTextView so it can carry Markdown tags, but it is prose on
+   the page rather than a field: without this it paints the theme's view
+   background and reads as a box. */
+.turn-answer,
+.turn-answer text {
+  background: none;
+  line-height: 1.4;
+}
+
+/* A table in an answer is a real GtkGrid anchored where its source used to be,
+   so it is ruled the way a table is rather than left as a column of pipes. */
+.md-table {
+  margin: 6px 0;
+  border: 1px solid var(--card-shade-color);
+  border-radius: 6px;
+}
+
+.md-table-cell {
+  padding: 4px 10px;
+}
+
+/* The header is bold and ruled off rather than filled: a fill would paint
+   square corners over the grid's rounded ones. */
+.md-table-rule {
+  border-top: 1px solid var(--card-shade-color);
+}
+
+.turn-thinking {
+  /* Reasoning is long. Give it room to breathe without competing with the
+     answer above it. */
+  margin-top: 4px;
+  margin-left: 6px;
+}
+
+.composer {
+  padding: 4px;
+}
+
+.composer-entry {
+  background: none;
+}
+
+/* Tool chips: what the assistant reached for, and how it went. */
+.tool-chip {
+  padding: 3px 10px 3px 8px;
+  border-radius: 9999px;
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--card-shade-color);
+}
+
+.tool-chip.tool-failed {
+  color: var(--error-color);
+  border-color: var(--error-color);
+}
+
+.tool-chip.tool-denied {
+  color: var(--warning-color);
+  border-color: var(--warning-color);
+}
+
+/* A chip is a button, so that opening its detail is focusable and works from
+   the keyboard. The button itself contributes nothing visible — the pill
+   inside it is the whole appearance — so its own frame is removed and only
+   the states a person needs as feedback are drawn back on. */
+.tool-chip-button {
+  padding: 0;
+  min-height: 0;
+  min-width: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+.tool-chip-button:hover .tool-chip {
+  background-color: var(--card-shade-color);
+}
+
+.tool-chip-button:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+  border-radius: 9999px;
+}
+
+/* How a call went, in the detail as well as on the chip: a stripe down the
+   result, so a glance says whether it worked before a word is read. */
+.tool-result-failed {
+  border-left: 3px solid var(--error-color);
+}
+
+.tool-result-denied {
+  border-left: 3px solid var(--warning-color);
+}
+
+/* Images: attached, and shown back with the question they came with. */
+.staged-image {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.turn-image {
+  border-radius: 6px;
+}
+
+/* The workflow strip, between the conversation and the composer. Its own rule
+   only for the padding a `.toolbar` does not give a row with a label in it; the
+   colours are the toolbar's, because it is one. */
+.workflow-strip {
+  padding: 6px 12px;
+}
+
+/* The label is the sheet's handle as well as a label, so it has to read as
+   something you can press. */
+.workflow-strip label:hover {
+  opacity: 0.8;
+}

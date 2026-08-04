@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Familiar
+GenericName=Assistant
+Comment=Talk to a model running on your own machine
+Categories=Utility;GNOME;GTK;
+Keywords=assistant;chat;ai;llm;llama;local;notes;
+Exec=familiar
+Icon=us.hagreli.Familiar
+Terminal=false
+StartupNotify=true
+# Must match the application ID so the shell associates windows with this entry.
+StartupWMClass=us.hagreli.Familiar
+DBusActivatable=true
+# A scheduled chat reports through a GNotification, and without this the app
+# never appears in Settings -> Notifications for the user to control it.
+X-GNOME-UsesNotifications=true
+Actions=new-chat;
+
+[Desktop Action new-chat]
+Name=New Chat
+Exec=familiar --new-chat

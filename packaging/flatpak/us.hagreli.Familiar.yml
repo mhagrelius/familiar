@@ -1,0 +1,88 @@
+# Flatpak manifest for Familiar.
+#
+# Two permission questions here, and they pull in opposite directions.
+#
+# **The server.** Familiar talks to a llama-server on this machine, over
+# loopback. Flatpak has no "localhost only" permission — --share=network is
+# all or nothing — so it is declared, and the app's own behaviour is what keeps
+# it local: the only address it ever contacts is the one in Preferences, and
+# the web tools are off unless a context switches them on.
+#
+# **The vault.** Memory is Brain's notes, in a folder the user chooses, which
+# is by definition outside the sandbox. It goes through the file portal, the
+# same way Brain does: GtkFileDialog returns a path the sandbox can reach and
+# the document store keeps that grant across restarts. No --filesystem is
+# declared. If a lifetime grant turns out not to survive in practice, the
+# documented retreat is --filesystem=home, argued for rather than slipped in.
+#
+# Build:  packaging/build-flatpak.sh
+
+id: us.hagreli.Familiar
+
+# GNOME 50: the first runtime carrying libadwaita 1.9, which this is compiled
+# against (AdwSidebar, AdwWrapBox, AdwShortcutsDialog), and GTK 4.22.
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: familiar
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+
+  # The local model. See the note at the top: this cannot be narrowed to
+  # loopback by manifest, only by what the app does.
+  - --share=network
+
+  # Deliberately absent:
+  #   --filesystem=*   the vault is reached through the file portal, and the
+  #                    document store persists that grant across restarts
+  #   --talk-name=*    nothing here talks to another application
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/familiar/cargo
+
+modules:
+  # libsoup is in the runtime, but its development files are not, and soup3-sys
+  # needs them to build.
+  - name: familiar
+    buildsystem: simple
+    build-options:
+      env:
+        # Dependencies come from cargo-sources.json, not the network, so
+        # offline builders can reproduce this.
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked
+
+      - install -Dm755 target/release/familiar /app/bin/familiar
+      - install -Dm644 data/us.hagreli.Familiar.desktop
+          /app/share/applications/us.hagreli.Familiar.desktop
+      - install -Dm644 data/us.hagreli.Familiar.metainfo.xml
+          /app/share/metainfo/us.hagreli.Familiar.metainfo.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/us.hagreli.Familiar.svg
+          /app/share/icons/hicolor/scalable/apps/us.hagreli.Familiar.svg
+      - install -Dm644 data/icons/hicolor/symbolic/apps/us.hagreli.Familiar-symbolic.svg
+          /app/share/icons/hicolor/symbolic/apps/us.hagreli.Familiar-symbolic.svg
+
+      # Required: the desktop file is DBusActivatable, and build-export fails
+      # hard if the matching service file is missing.
+      - install -Dm644 packaging/flatpak/us.hagreli.Familiar.service
+          /app/share/dbus-1/services/us.hagreli.Familiar.service
+
+    sources:
+      # Local builds read the working tree. For a submission, replace this with
+      # the tagged release and a generated cargo-sources.json.
+      - type: dir
+        path: ../..
+      - type: file
+        path: cargo-sources.json
+        dest-filename: cargo-sources.json

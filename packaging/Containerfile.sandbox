@@ -1,0 +1,36 @@
+# The image `run_python` executes in.
+#
+# Built once with `packaging/build-sandbox.sh`, then run with no network at all,
+# which is why every library the model might reach for has to be in here: there
+# is no `pip install` at run time and there is deliberately no way to add one.
+#
+# The list is Anthropic's, not ours. `src/model/office/skills.rs` records that
+# their versions of the document skills are Python driven by a code interpreter
+# — python-docx, openpyxl, python-pptx — and that those skills are good because
+# the libraries underneath them are. A model that has read a great deal of
+# pandas and matplotlib should find them where it expects them.
+FROM docker.io/library/python:3.12-slim
+
+# Fonts, so a matplotlib figure has something to draw labels with, and tzdata so
+# date arithmetic across zones is right rather than UTC-only.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fonts-dejavu-core tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+      numpy pandas scipy sympy \
+      matplotlib \
+      openpyxl python-docx python-pptx \
+      pypdf reportlab \
+      pillow tabulate python-dateutil
+
+# Matplotlib picks an interactive backend when it cannot tell, then fails on a
+# machine with no display. There is no display here and never will be.
+ENV MPLBACKEND=Agg
+# Written into the bind mount rather than a container path that vanishes.
+ENV MPLCONFIGDIR=/work/.familiar/mpl
+# Unbuffered, so a script that prints and then raises still shows what it
+# printed. Buffered output is lost with the process.
+ENV PYTHONUNBUFFERED=1
+# The model's scratch directory, and where it is standing when it starts.
+WORKDIR /work

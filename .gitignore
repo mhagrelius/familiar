@@ -1,0 +1,8 @@
+/target
+/dist
+/preview
+/.flatpak-build
+# Generated from Cargo.lock by packaging/build-flatpak.sh
+/packaging/flatpak/cargo-sources.json
+# Review notes taken against a run's HTML report — working material, not the project.
+/eval_feedback_from_me.md

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>us.hagreli.Familiar</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Familiar</name>
+  <summary>Talk to a model running on your own machine</summary>
+
+  <description>
+    <p>
+      Familiar is an assistant for GNOME that talks to a llama-server on your
+      own hardware. No account, no API bill, and nothing leaves the machine
+      unless you switch on the web tools and the model reaches for one.
+    </p>
+    <p>
+      It remembers by writing Markdown into your notes — the same folder Brain
+      uses — so what the assistant knows is a file you can read, edit and
+      delete without either app.
+    </p>
+    <p>Contexts keep separate work separate, each with its own persona and its own tools.</p>
+  </description>
+
+  <launchable type="desktop-id">us.hagreli.Familiar.desktop</launchable>
+
+  <url type="homepage">https://github.com/mhagrelius/familiar</url>
+  <url type="bugtracker">https://github.com/mhagrelius/familiar/issues</url>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+
+  <categories>
+    <category>Utility</category>
+  </categories>
+
+  <keywords>
+    <keyword>assistant</keyword>
+    <keyword>llm</keyword>
+    <keyword>local</keyword>
+    <keyword>notes</keyword>
+  </keywords>
+
+  <content_rating type="oars-1.1"/>
+
+  <developer id="us.hagreli">
+    <name>Matthew Hagrelius</name>
+  </developer>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-01">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Symbolic: one colour, 16x16 grid, no gradients. The bubble and the ears,
+     which is as much of the idea as survives at this size. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="currentColor">
+    <path d="M3 2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8l-3.5 3v-3H3a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 1a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h2.5v1.8L8 12h5a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1z"/>
+    <path d="M6 10V7.5a2 2 0 0 1 4 0V10z"/>
+    <path d="M6 8L4.6 5.8 7 6.4z"/>
+    <path d="M10 8l1.4-2.2L9 6.4z"/>
+  </g>
+</svg>
