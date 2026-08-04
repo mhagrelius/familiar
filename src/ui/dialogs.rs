@@ -546,6 +546,11 @@ pub struct Scheduled {
     pub enabled: bool,
     /// "Ran 20 minutes ago", or why it has not.
     pub status: String,
+    /// The cadence and standing prompt as values rather than as the sentences
+    /// above them, so the editor can open pre-filled with what is actually set.
+    /// `schedule` and `prompt` are what this row *reads* as; this is what it
+    /// *is*.
+    pub current: Option<(crate::model::heartbeat::Schedule, String)>,
 }
 
 /// What the window asks the application to do.
@@ -562,6 +567,19 @@ pub enum Change {
     Opened {
         slug: String,
         thread: String,
+    },
+    /// A new cadence and standing prompt for a schedule, edited in place.
+    ///
+    /// The window that lists schedules is the window people go to when they want
+    /// to change one, and it could only switch them off or delete them — the
+    /// editor was a main-menu item that silently acted on whichever chat
+    /// happened to be open. Setting one from the wrong chat did not fail or
+    /// warn; it made a second schedule somewhere else.
+    Edited {
+        slug: String,
+        thread: String,
+        schedule: crate::model::heartbeat::Schedule,
+        prompt: String,
     },
 }
 
@@ -605,9 +623,12 @@ where
 
     let on_change = Rc::new(on_change);
     for entry in scheduled {
+        // The cadence has moved out of the description and into a row of its
+        // own, because it is now something you can click to change rather than
+        // a label. What is left up here is which project the chat belongs to.
         let group = adw::PreferencesGroup::builder()
             .title(&entry.title)
-            .description(format!("{} · {}", entry.project, entry.schedule))
+            .description(&entry.project)
             .build();
 
         let running = adw::SwitchRow::builder()
@@ -629,15 +650,73 @@ where
         });
         group.add(&running);
 
-        // The prompt, shown rather than hidden behind an edit button: what a
-        // scheduled chat will ask is the thing you most want to check when
-        // you come looking for it.
+        // The two things a schedule *is*, each shown rather than hidden behind
+        // an edit button — what a scheduled chat asks and when is the thing you
+        // most want to check when you come looking for it — and each one a row
+        // you can activate to change it. Two rows onto one editor rather than a
+        // single Edit button, because whichever of them you came here to alter
+        // is the one you will reach for, and a boxed list is read as a list of
+        // fields.
+        let when = adw::ActionRow::builder()
+            .title("Schedule")
+            .subtitle(&entry.schedule)
+            .activatable(true)
+            .build();
+        when.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        group.add(&when);
+
         let prompt = adw::ActionRow::builder()
             .title("Prompt")
             .subtitle(&entry.prompt)
+            .activatable(true)
             .build();
         prompt.set_subtitle_lines(3);
+        prompt.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         group.add(&prompt);
+
+        // Both rows open the same editor, pre-filled from this schedule, and
+        // write back through `Change::Edited` — which goes to `edit_heartbeat`,
+        // so it reaches the chat whether or not it is the one on screen. That
+        // is the whole point: you should not have to find and open a chat to
+        // change the thing you are already looking at.
+        let edit = {
+            let on_change = on_change.clone();
+            let slug = entry.slug.clone();
+            let thread = entry.thread.clone();
+            let title = entry.title.clone();
+            let existing = entry.current.clone();
+            let dialog = dialog.clone();
+            let when = when.clone();
+            let prompt = prompt.clone();
+            move || {
+                let on_change = on_change.clone();
+                let slug = slug.clone();
+                let thread = thread.clone();
+                let when = when.clone();
+                let prompt = prompt.clone();
+                edit_schedule(&dialog, &title, existing.clone(), move |chosen| {
+                    let Some((schedule, asked)) = chosen else {
+                        return;
+                    };
+                    // Written straight back into the rows, so the list a person
+                    // is still looking at says what they just set rather than
+                    // what it used to say.
+                    when.set_subtitle(&schedule.describe());
+                    prompt.set_subtitle(&asked);
+                    on_change(Change::Edited {
+                        slug: slug.clone(),
+                        thread: thread.clone(),
+                        schedule,
+                        prompt: asked,
+                    });
+                });
+            }
+        };
+        when.connect_activated({
+            let edit = edit.clone();
+            move |_| edit()
+        });
+        prompt.connect_activated(move |_| edit());
 
         let open = gtk::Button::with_label("Open");
         open.set_valign(gtk::Align::Center);
@@ -713,8 +792,13 @@ where
 /// accepts `0 7 * * 1-5` asks the user to encode it and then to read it back
 /// later. Every product in this space that started with cron has ended up
 /// shipping this list.
+/// `chat` is the name of the conversation being scheduled, and it is shown
+/// rather than implied. Reached from the main menu this edits whichever chat is
+/// open, and there was nothing on screen to say which — so a schedule set from
+/// the wrong chat did not fail, it quietly made a second one somewhere else.
 pub fn edit_schedule<F>(
     parent: &impl IsA<gtk::Widget>,
+    chat: &str,
     existing: Option<(crate::model::heartbeat::Schedule, String)>,
     on_save: F,
 ) where
@@ -910,6 +994,7 @@ pub fn edit_schedule<F>(
         .show_end_title_buttons(false)
         .show_start_title_buttons(false)
         .build();
+    header.set_title_widget(Some(&adw::WindowTitle::new("Schedule", chat)));
     header.pack_start(&cancel);
     header.pack_end(&save);
 

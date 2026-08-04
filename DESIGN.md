@@ -1288,6 +1288,18 @@ project from disk rather than from memory — only the open chat is loaded, and 
 schedule set up last week in another project is exactly the one somebody opens
 that window to find.
 
+Which is also why the cadence and the standing prompt are rows you can activate
+rather than labels. They were labels, and `Schedule…` in the main menu was the
+only editor — acting on whichever chat happened to be open, with nothing on
+screen to say which. Somebody who came to change a briefing they set up last
+week had no route to it at all, and setting one from the wrong chat did not fail
+or warn: it made a second schedule somewhere else. Both rows now open the same
+editor against the schedule being looked at, writing back through the path the
+Enabled switch already used, which reaches a chat whether or not it is open.
+`last_run` survives the edit, so moving a daily briefing from 07:00 to 08:00
+does not make this morning's run happen twice. The editor names the chat it is
+editing in its header, which is what the menu route was missing.
+
 ### GitHub, through `gh`
 
 `gh` is installed and signed in, holding a token in the keyring, so the useful

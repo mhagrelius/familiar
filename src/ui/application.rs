@@ -3743,6 +3743,7 @@ impl Application {
                     prompt: heartbeat.prompt.clone(),
                     enabled: heartbeat.enabled,
                     status: describe_status(&heartbeat, now),
+                    current: Some((heartbeat.schedule, heartbeat.prompt.clone())),
                 });
             }
         }
@@ -3760,8 +3761,10 @@ impl Application {
             .as_ref()
             .map(|heartbeat| (heartbeat.schedule, heartbeat.prompt.clone()));
 
+        let chat = self.imp().thread.borrow().display_title();
         dialogs::edit_schedule(
             &window,
+            &chat,
             existing,
             clone!(
                 #[weak(rename_to = app)]
@@ -3829,6 +3832,23 @@ impl Application {
                         app.remove_heartbeat(&slug, &thread);
                     }
                     dialogs::Change::Opened { slug, thread } => app.open_thread(&slug, &thread),
+                    // Through the same path the switch uses, so it lands on the
+                    // chat that owns the schedule whether or not that is the
+                    // one on screen. `last_run` is deliberately left alone:
+                    // moving a daily briefing from 07:00 to 08:00 must not make
+                    // this morning's run happen a second time.
+                    dialogs::Change::Edited {
+                        slug,
+                        thread,
+                        schedule,
+                        prompt,
+                    } => {
+                        app.edit_heartbeat(&slug, &thread, move |heartbeat| {
+                            heartbeat.schedule = schedule;
+                            heartbeat.prompt = prompt;
+                        });
+                        app.refresh_threads();
+                    }
                 }
             ),
         );

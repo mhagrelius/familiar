@@ -166,7 +166,8 @@ runs. The words come back as a file, not as forty kilobytes of context.
 itself and notifies you. It is the *same* chat, so it can refer back to what it
 found last time. A run the machine slept through is skipped rather than
 delivered stale. **Scheduled Chats** in the menu lists them all with their
-status, and pauses or removes one without touching the conversation.
+status; click the schedule or the prompt to change either, and pause or remove
+one without touching the conversation.
 
 You can also just ask for it — "set me up a morning briefing at seven" switches
 scheduling on and sets one, and you approve the exact time and the exact

@@ -1363,6 +1363,7 @@ const CASES: &[Case] = &[
             prompt: "what is due?".into(),
             enabled: true,
             status: "Last ran 2 hours ago".into(),
+            current: None,
         }];
         window.show_project_page(&planning, &[], &scheduled);
 
@@ -1376,6 +1377,67 @@ const CASES: &[Case] = &[
             "{titles:?}"
         );
     }),
+    (
+        "a schedule can be changed from the window that lists it",
+        |window| {
+            // The gap this closes: the one place you go looking for a schedule
+            // could switch it off or delete it and not change it, and the
+            // editor was a main-menu item that acted on whichever chat happened
+            // to be open. Somebody who was not in the right chat had no route
+            // at all.
+            let heard = Rc::new(RefCell::new(Vec::<String>::new()));
+            let scheduled = [familiar::ui::dialogs::Scheduled {
+                slug: "default".into(),
+                project: "Chats".into(),
+                thread: "t1".into(),
+                title: "Morning Briefing".into(),
+                schedule: "Daily at 08:00".into(),
+                prompt: "AI news and the weather.".into(),
+                enabled: true,
+                status: "Last ran just now".into(),
+                current: Some((
+                    familiar::model::heartbeat::Schedule::Daily {
+                        at: chrono::NaiveTime::from_hms_opt(8, 0, 0).expect("08:00"),
+                    },
+                    "AI news and the weather.".into(),
+                )),
+            }];
+            familiar::ui::dialogs::present_schedules(window, &scheduled, {
+                let heard = heard.clone();
+                move |change| {
+                    if let familiar::ui::dialogs::Change::Edited { prompt, .. } = change {
+                        heard.borrow_mut().push(prompt);
+                    }
+                }
+            });
+
+            // Both of the things a schedule *is* are rows, and both are a click
+            // away from the editor.
+            let rows = action_rows(window.clone().upcast());
+            let editable: Vec<String> = rows
+                .iter()
+                .filter(|row| row.is_activatable())
+                .map(|row| row.title().to_string())
+                .collect();
+            assert!(
+                editable.contains(&"Schedule".to_string())
+                    && editable.contains(&"Prompt".to_string()),
+                "the rows that can be edited are {editable:?}"
+            );
+
+            // And activating one reaches the chat that owns the schedule,
+            // rather than whichever one is open.
+            let prompt = rows
+                .iter()
+                .find(|row| row.title() == "Prompt")
+                .expect("a Prompt row");
+            prompt.emit_activate();
+            assert!(
+                heard.borrow().is_empty(),
+                "activating a row must open the editor, not save on the spot"
+            );
+        },
+    ),
     ("the page reports what it was clicked for", |window| {
         let folder = tempfile::tempdir().expect("a folder");
         std::fs::write(folder.path().join("read-me.md"), "hello").expect("a file");
@@ -1780,6 +1842,19 @@ fn find<T: IsA<gtk::Widget>>(root: gtk::Widget) -> Option<T> {
             if let Ok(widget) = widget.clone().downcast::<T>() {
                 found = Some(widget);
             }
+        }
+    });
+    found
+}
+
+/// Every `AdwActionRow` under `root`, dialogs included. A row's title is a
+/// label like any other, so `labels` sees the text — but not whether the row
+/// can be activated, which is the whole affordance in a boxed list.
+fn action_rows(root: gtk::Widget) -> Vec<adw::ActionRow> {
+    let mut found = Vec::new();
+    walk(&root, &mut |widget| {
+        if let Ok(row) = widget.clone().downcast::<adw::ActionRow>() {
+            found.push(row);
         }
     });
     found
