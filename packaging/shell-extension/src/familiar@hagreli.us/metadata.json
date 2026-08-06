@@ -1,0 +1,11 @@
+{
+  "uuid": "familiar@hagreli.us",
+  "name": "Familiar",
+  "description": "See what Familiar has scheduled from the Quick Settings panel: what runs next, what happened last time, and a switch to pause anything.\n\nReads the us.hagreli.Familiar.Jobs D-Bus interface, so it shows nothing useful unless Familiar is installed. Familiar keeps working with this extension absent — it is a surface, not a dependency.",
+  "shell-version": [
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/mhagrelius/familiar"
+}

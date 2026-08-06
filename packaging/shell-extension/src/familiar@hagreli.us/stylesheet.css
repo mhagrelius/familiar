@@ -1,0 +1,10 @@
+/* The job name, and the schedule line under it. Two rows make one entry, so
+   the weight is what tells the reader which is which. */
+
+.familiar-job-title {
+    font-weight: bold;
+}
+
+.familiar-job-detail {
+    font-size: 90%;
+}
