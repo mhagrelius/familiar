@@ -121,6 +121,16 @@ and a background, `[[links]]` are blue and open in Brain. Unlike Brain's editor
 the markers are hidden unconditionally — nobody is editing a reply — and the
 view is not editable.
 
+Hiding the syntax is not the same as taking back the room it occupied, and the
+difference is most of the scrolling in a long answer. The buffer holds what the
+model wrote, so a paragraph break is an empty line costing a line of prose, a
+fence is two more, and the newline that ends a table's source asks for a line of
+height under the grid that replaced it. So a blank line between blocks is kept
+at a fraction of its height — the gap is what says two paragraphs are two — and
+a line with nothing left on it to draw loses its newline as well as its
+characters. On a reply with six headings, a table and a code block in it that is
+a fifth of the height, measured off the conversation preview.
+
 Thinking sits above the answer behind a disclosure that reads "Thought for 4s"
 once the turn settles, collapsed by default and remembered per preference. It is
 set at caption size and dimmed: present, subordinate, never competing with the
@@ -1434,6 +1444,7 @@ src/
       harvest.rs             reading a finished turn for anything durable
       dream.rs               nightly consolidation: two passes and the rails
     compaction.rs            token threshold, rolling summary, floor
+    voice.rs                 endpointing, continuation, and answers as speech
     tools.rs                 tool declarations and the gate policy
     eval/                    three eval suites: prompt, recall, memory
     settings.rs              persisted preferences; config vs settings vs thread
@@ -1458,6 +1469,12 @@ src/
     preferences.rs          AdwPreferencesDialog
     client.rs               libsoup: request, SSE read, cancel
     embedder.rs             the embedding thread; the only other socket
+    voice/                  talking to it: five boundaries and a window
+      recorder.rs           pw-record on a pipe
+      speech.rs             two Parakeet models on the second worker thread
+      tts.rs                speech-dispatcher, or /v1/audio/speech
+      shortcut.rs           a gnome-settings-daemon custom keybinding
+      window.rs             the window the shortcut opens
     style.css
 ```
 
@@ -1487,6 +1504,17 @@ and the stop button both trigger.
 
 **Widgets emit intent; `FamiliarApplication` is the only thing that writes a
 file or mutates the index.** Same rule as Brain, same reason.
+
+**A spoken question is an ordinary turn and voice is not a mode.** The
+microphone, the speech model and the synthesiser are boundaries under
+`ui/voice/`; what they produce is a question that goes down the same path a
+scheduled run takes — `Chat::Background`, no turn widget, a real chat on disk —
+so memory, folding, workflows and the sidebar all apply to it without knowing
+where the words came from. Two consequences are worth stating because they
+constrain everything else. The shortcut works with the main window closed, so
+the spoken path may never touch a `Window`; and the voice register is appended
+to the *question* rather than the system prompt, so a chat that mixes typing
+and talking keeps one cached prefix instead of alternating between two.
 
 ## Testing
 
@@ -2034,6 +2062,45 @@ somebody else wrote.
 
 Where the finished thing differs from this document, this is what happened.
 
+- **The Flatpak was dropped, and `./install.sh` is the only distribution.**
+  Several arguments in this document are made against a sandbox — the
+  Background portal rather than a systemd unit, Cairo and Pango rather than
+  LibreOffice, `soup3` because it is in `org.gnome.Sdk`. They were written when
+  a Flatpak was the intended shape and they still hold on their own merits, so
+  they are left as they are; what changed is the premise. The app grew a
+  capability surface that is mostly *other programs*: `planner`, `magpie`,
+  `gh`, `claude` and `codex`, `podman` for `run_python`, and now `pw-record`
+  and `spd-say`. None of them are in the runtime, and reaching them means
+  `--talk-name=org.freedesktop.Flatpak` — full host access, which is a larger
+  hole than the sandbox was closing. The manifest had also never been built:
+  it listed a `cargo-sources.json` nobody generated and named a
+  `build-flatpak.sh` nobody wrote. Keeping it would have been keeping a claim
+  rather than a package.
+- **Push-to-talk was designed for and dropped.** The plan was the
+  `GlobalShortcuts` portal, which delivers press *and* release. Measured on
+  GNOME 50 / xdg-desktop-portal 1.21.1, `CreateSession` returns `NotAllowed:
+  An app id is required`; since portal 1.21 an application identity is
+  mandatory and the mechanism a non-Flatpak app uses to declare one,
+  `org.freedesktop.host.portal.Registry`, is not exported by this portal
+  build — the bus name is owned by nothing. A systemd scope named after the
+  app was tried too and changes nothing. So the shortcut is a
+  gnome-settings-daemon custom keybinding, which is press-only, listening is a
+  toggle, and silence ends an utterance. Reading `/dev/input` directly would
+  restore push-to-talk at the cost of putting the user in the `input` group,
+  which hands a keylogger to every process they run. Not worth one key.
+- **No model routes a spoken question to a chat.** The design considered
+  asking the model whether an utterance belonged with an existing
+  conversation. It sits on the one path where latency is the whole product,
+  and it is wrong *silently* — a question appended to the wrong chat looks
+  like nothing at all until the answer is strange. A follow-up window does
+  most of the work for nothing, and what it cannot decide, the person can:
+  the window names the chat it is continuing and one button starts a new one.
+- **Speaking and listening do not overlap.** Full barge-in means an open
+  microphone during playback, which means echo cancellation and a permanent
+  microphone indicator in the panel. Pressing the shortcut while it talks
+  stops it talking and starts listening, which is what interrupting somebody
+  is, and it needs neither.
+
 - **`Store` lives in `project.rs`.** The file tree above named no owner for the
   data directory, and projects and their chats are one on-disk shape reached
   through one slug-to-path check. Splitting them would have put that check
@@ -2278,6 +2345,86 @@ Where the finished thing differs from this document, this is what happened.
   is not there, or a part with no declared content type. One test walks all
   three archives and checks both, because that class of bug is invisible in
   correct XML.
+
+### Talking to it: the gate is a measurement, not a taste
+
+Silence ends an utterance, because the shortcut is press-only. So a number
+decides when somebody stopped talking, and every version of that number has been
+wrong in a way that only a microphone could show. What follows is the measurement
+the current one comes from, because the numbers alone read as arbitrary and the
+next person to change a microphone will need it. Levels are on the curve
+`ui::voice::recorder::level` produces — RMS raised to 0.4 — over 40 ms blocks.
+
+A silent room and seven seconds of ordinary talking, on this desk, through the
+Insta360 with its noise cancelling **off**:
+
+| | silent room | speech |
+|---|---|---|
+| median | 0.124 | 0.343 |
+| p90 | 0.221 | 0.511 |
+| p99 | 0.357 | 0.562 |
+| rolling-window p25 | 0.073 | 0.225 |
+| rolling-window minimum | 0.017 | 0.026 |
+
+Four things follow, and three of them contradict what the code said before.
+
+**A rolling minimum is not a room.** It reads 0.017 in a room whose actual level
+is 0.124, because this microphone emits *silence interrupted by noise* — a tenth
+of its blocks in a quiet room are exactly 0.000. So `room + margin` fell below
+`floor` on every block, `gate()` returned the constant 0.20 forever, and the
+adaptive machinery contributed nothing while the room it was adapting to sat
+above that floor 15% of the time. The room is now the window's **25th
+percentile**: low enough to sit under speech, which has gaps, high enough that
+occasional true silence cannot drag it to zero.
+
+**The ceiling is set by the gaps in speech, not by how loud a voice is.** Silence
+under the gate is what ends an utterance, so a gate above the quiet moments
+between words ends it mid-sentence. At a gate of 0.35 the longest gap inside
+ordinary speech is 640 ms; at 0.40 it is 1320 ms, past `hangover_ms`. `loud` came
+*down* from 0.42 to 0.34 for that reason — the old value was justified as "this
+loud is a voice", which is true and beside the point.
+
+**The old gate had a 10% margin and needed 300%.** At 0.20 the longest quiet run
+in a silent room is 880 ms against an 800 ms hangover, so a noise burst usually
+reset the silence counter first and `Ended` never fired: the microphone stayed
+open for two minutes. At 0.30 that run is 1720 ms. `margin` carries the working
+range now (0.21 above a measured p25 puts the gate at 0.23 in a quiet room and
+0.30 in this one) and `floor` is a sanity minimum rather than the value silently
+always used.
+
+**Cumulative speech cannot say whether the words are yours.** `has_speech()`
+never resets, so a few seconds of any real room made it true and every word the
+streaming model hallucinated on room noise then reset `Spoken`'s clock. Measured
+under the pessimistic assumption that the live model emits words for every chunk:
+twenty of thirty-one chunks of a *silent* room were credited to the speaker and
+the microphone never closed. `Endpointer::heard_you` asks instead how much of the
+last 1.5 s was above the gate — at most 200 ms for a silent room, at least 720 ms
+for speech, so `attributable_ms` sits at 400 in a gap nothing lands in. Under the
+same pessimistic assumption it now credits none of them and gives up at 8 s.
+
+Barge-in moved for the same reason: `voice` was 0.18, chosen against a room
+believed to read 0.01 that actually reads 0.124 with peaks to 0.385, so a quarter
+of its silent blocks cleared the floor meant to sit above them. 0.32 is picked
+structurally rather than for comfort — the longest unbroken run of room noise
+above it is 120 ms and `trigger_ms` is 160, so a silent room *cannot* interrupt
+however long it is listened to, while speech reaches the trigger in four blocks.
+
+**Everything above is one microphone in one room, and that is the honest status
+of it.** The shapes are general — a percentile beats a minimum, a ceiling is set
+by speech's gaps, recency beats a running total — but the constants are this
+desk's. The webcam's noise cancelling moves them by an order of magnitude on its
+own, which is what invalidated the first set.
+
+Two failures here are not about levels at all. **A capture that dies stalls
+everything**: every way out of `Listening` is driven by a block of audio
+arriving, including the endpointer's own patience, so `pw-record` exiting — a
+source that no longer exists, with stderr silenced — left the window listening
+forever with nothing to say so. `Recorder` now reports a pipe that closes, and a
+timer catches the other case, a process that stays alive and delivers nothing.
+And **the live model's last part-chunk was thrown away**: the streaming encoder
+emits nothing until it has a whole 560 ms, so the last thing anybody said sat in
+`pending` and never reached the screen. Scribe had the identical hole, where it
+took the end off every dictation rather than off a preview.
 
 ## Settled
 

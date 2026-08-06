@@ -254,6 +254,14 @@ pub struct Settings {
     /// earn the right, and the way it earns it is by being switched on.
     #[serde(default)]
     pub lookout: bool,
+    /// Keep running with the window closed, so a schedule fires whether or not
+    /// anybody has the app open.
+    ///
+    /// Off by default: an app that will not quit when you close it is a
+    /// surprise, and it has to be asked for. On, closing the window leaves the
+    /// process running and the jobs keep their clock.
+    #[serde(default)]
+    pub background: bool,
     /// How often, in hours.
     #[serde(default = "default_lookout_hours")]
     pub lookout_hours: u32,
@@ -274,6 +282,39 @@ pub struct Settings {
     /// `/props` says otherwise.
     #[serde(default = "default_context_window")]
     pub context_window: u32,
+    /// The keyboard shortcut that starts listening, as GNOME spells it.
+    ///
+    /// `None` means voice has never been switched on. It is off until asked
+    /// for, because registering a system-wide key on somebody's behalf is not a
+    /// thing to do at first launch — and because the microphone is involved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_shortcut: Option<String>,
+    /// Which input `pw-record` is told to take. Empty is the system default,
+    /// which is what almost everybody wants.
+    #[serde(default)]
+    pub voice_source: String,
+    /// How the answer is read back: `off`, `desktop` or `endpoint`.
+    #[serde(default = "default_voice_reply")]
+    pub voice_reply: String,
+    /// An OpenAI-shaped speech server, when `voice_reply` is `endpoint`.
+    #[serde(default)]
+    pub voice_endpoint: String,
+    /// The voice's name, as that server spells it.
+    #[serde(default = "default_voice_name")]
+    pub voice_name: String,
+    /// What sample rate its raw PCM comes back at. Kokoro's is 24 kHz.
+    #[serde(default = "default_voice_rate")]
+    pub voice_rate: u32,
+    /// How long after a spoken exchange the next one carries on the same chat.
+    /// Zero starts a new chat every time.
+    #[serde(default = "default_follow_up")]
+    pub voice_follow_up: i64,
+    /// Listen again as soon as it has finished answering, so a conversation is
+    /// a conversation rather than a series of dictations. On: saying nothing
+    /// ends it after a few seconds, so it costs a pause to leave and a key
+    /// press to resume either way.
+    #[serde(default = "yes")]
+    pub voice_converse: bool,
     #[serde(default)]
     pub window_width: Option<i32>,
     #[serde(default)]
@@ -298,6 +339,7 @@ impl Default for Settings {
             dream_hour: default_dream_hour(),
             last_dream: None,
             lookout: false,
+            background: false,
             lookout_hours: default_lookout_hours(),
             last_lookout: None,
             mail: None,
@@ -305,6 +347,14 @@ impl Default for Settings {
             escalate_model: None,
             keep_recent_turns: default_keep_recent(),
             context_window: default_context_window(),
+            voice_shortcut: None,
+            voice_source: String::new(),
+            voice_reply: default_voice_reply(),
+            voice_endpoint: String::new(),
+            voice_name: default_voice_name(),
+            voice_rate: default_voice_rate(),
+            voice_follow_up: default_follow_up(),
+            voice_converse: true,
             window_width: None,
             window_height: None,
             window_maximized: false,
@@ -323,6 +373,20 @@ impl Settings {
     pub fn dream_schedule(&self) -> crate::model::heartbeat::Schedule {
         crate::model::heartbeat::Schedule::Daily {
             at: chrono::NaiveTime::from_hms_opt(self.dream_hour.min(23), 0, 0).unwrap_or_default(),
+        }
+    }
+
+    /// How often the proactive check runs, in the same terms as everything else
+    /// that runs on its own.
+    ///
+    /// It had its own arithmetic — a raw hours comparison against `last_lookout`
+    /// — which was a third notion of "due" beside the schedule model and the
+    /// jobs list. Same reasoning as [`Self::dream_schedule`]: the hard part is
+    /// not "every four hours", it is deciding whether to fire after the machine
+    /// was asleep through it, and that is written and tested once.
+    pub fn lookout_schedule(&self) -> crate::model::heartbeat::Schedule {
+        crate::model::heartbeat::Schedule::Hours {
+            hours: self.lookout_hours.max(1),
         }
     }
 
@@ -395,6 +459,29 @@ fn default_dream_hour() -> u32 {
 
 fn default_context_window() -> u32 {
     32_768
+}
+
+/// The desktop's own synthesiser, because it is already installed. A better
+/// voice is a server away and a preference away; silence would make the
+/// feature half a feature by default.
+fn default_voice_reply() -> String {
+    "desktop".to_string()
+}
+
+/// Kokoro's default American voice. Meaningless to speech-dispatcher, which is
+/// why it only reads it under `endpoint`.
+fn default_voice_name() -> String {
+    "af_heart".to_string()
+}
+
+fn default_voice_rate() -> u32 {
+    24_000
+}
+
+/// Long enough to ask a follow-up after reading the answer, short enough that
+/// the next unrelated thing does not land in the same chat.
+fn default_follow_up() -> i64 {
+    8
 }
 
 fn yes() -> bool {
@@ -549,12 +636,62 @@ mod tests {
         };
         let schedule = settings.dream_schedule();
         let last = local("2026-08-01 03:00");
+        let on_time = crate::model::heartbeat::Recovery::OnTime;
         assert!(schedule
-            .due(Some(last), local("2026-08-02 03:00"))
+            .due(Some(last), local("2026-08-02 03:00"), on_time)
             .is_some());
         assert!(schedule
-            .due(Some(last), local("2026-08-02 14:00"))
+            .due(Some(last), local("2026-08-02 14:00"), on_time)
             .is_none());
+    }
+
+    #[test]
+    fn the_lookout_uses_the_same_arithmetic_as_everything_else() {
+        // It had its own hours comparison, which is the third notion of "due"
+        // this replaced — and the one that had never been asked what to do
+        // about a machine that was asleep through an occurrence.
+        use chrono::TimeZone;
+        let local = |text: &str| {
+            chrono::Local
+                .from_local_datetime(
+                    &chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").expect("a time"),
+                )
+                .earliest()
+                .expect("a local time")
+        };
+        let settings = Settings {
+            lookout_hours: 4,
+            ..Settings::default()
+        };
+        let schedule = settings.lookout_schedule();
+        let last = local("2026-08-03 08:00");
+        let whenever = crate::model::heartbeat::Recovery::Whenever;
+
+        assert!(
+            schedule
+                .due(Some(last), local("2026-08-03 11:00"), whenever)
+                .is_none(),
+            "three hours in is not yet four"
+        );
+        assert!(schedule
+            .due(Some(last), local("2026-08-03 12:00"), whenever)
+            .is_some());
+        // Asleep for two days: one check, not twelve.
+        assert!(schedule
+            .due(Some(last), local("2026-08-05 12:00"), whenever)
+            .is_some());
+    }
+
+    #[test]
+    fn a_nonsense_lookout_interval_cannot_make_it_run_every_tick() {
+        let settings = Settings {
+            lookout_hours: 0,
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.lookout_schedule(),
+            crate::model::heartbeat::Schedule::Hours { hours: 1 }
+        );
     }
 
     #[test]

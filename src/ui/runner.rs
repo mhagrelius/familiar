@@ -344,14 +344,29 @@ impl Runner {
         let memory = self.memory.clone();
         let asked = query.clone();
         let answer = move |vector: Option<Vec<f32>>| {
-            let mut borrowed = memory.borrow_mut();
-            let Some(memory) = borrowed.as_mut() else {
-                done(ToolOutcome::Failed("no notes are configured".into()));
-                return;
+            // The vault borrow ends before `done` runs, and that is not
+            // tidiness. `done` continues the turn: it builds the next request,
+            // which reads the vault to decide which tools to offer. Holding
+            // the borrow across it makes that read a panic — and because this
+            // closure is called from a GLib callback, which cannot unwind, the
+            // panic aborts the process rather than failing the tool.
+            //
+            // `remember` and `forget` are safe from this by shape: they return
+            // their outcome and the borrow ends with them. Only this one has a
+            // callback, because only this one waits for a socket.
+            let outcome = {
+                let mut borrowed = memory.borrow_mut();
+                match borrowed.as_mut() {
+                    None => ToolOutcome::Failed("no notes are configured".into()),
+                    Some(memory) => {
+                        let found =
+                            memory.recall(&asked, RECALL_LIMIT, vector.as_deref(), Utc::now());
+                        memory.flush_ledger();
+                        Self::recalled(&asked, &found)
+                    }
+                }
             };
-            let found = memory.recall(&asked, RECALL_LIMIT, vector.as_deref(), Utc::now());
-            memory.flush_ledger();
-            done(Self::recalled(&asked, &found));
+            done(outcome);
         };
         match &self.embeddings {
             Some(embeddings) => embeddings.query(&query, answer),

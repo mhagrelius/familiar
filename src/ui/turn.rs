@@ -103,7 +103,7 @@ mod imp {
     impl Default for Turn {
         fn default() -> Self {
             Self {
-                layout: gtk::Box::new(gtk::Orientation::Vertical, 12),
+                layout: gtk::Box::new(gtk::Orientation::Vertical, 6),
                 attribution: gtk::Label::new(Some("You")),
                 images: adw::WrapBox::new(),
                 question: gtk::Label::new(None),
@@ -193,7 +193,7 @@ impl Turn {
         imp.images.set_line_spacing(6);
         imp.images.set_visible(false);
 
-        let asked = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let asked = gtk::Box::new(gtk::Orientation::Vertical, 2);
         asked.add_css_class("card");
         asked.add_css_class("turn-question");
         asked.append(&imp.attribution);
@@ -220,8 +220,8 @@ impl Turn {
 
         // Tool calls, as chips carrying the tool, its argument and its result —
         // so "done" cannot mask a no-op or an error.
-        imp.tools.set_child_spacing(6);
-        imp.tools.set_line_spacing(6);
+        imp.tools.set_child_spacing(4);
+        imp.tools.set_line_spacing(4);
         imp.tools.set_visible(false);
 
         imp.answer.set_visible(false);
@@ -475,7 +475,11 @@ fn chip(name: &str, argument: Option<&str>, state: ToolChip) -> gtk::Widget {
         _ => name.to_string(),
     }));
     label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    label.set_max_width_chars(48);
+    // Narrow enough that a turn's calls pack two or three to a line rather than
+    // one each: five searches down the side of an answer is a wall, and the
+    // argument is a reminder of what was asked, not the record — the chip opens
+    // onto that.
+    label.set_max_width_chars(32);
     label.add_css_class("caption");
 
     let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);

@@ -41,6 +41,23 @@ Name=$APP_ID
 Exec=$BIN_DIR/familiar --gapplication-service
 EOF
 
+# The voice shortcut records an absolute path, because gnome-settings-daemon
+# spawns with an environment that does not reliably carry ~/.local/bin on its
+# PATH. Switched on from a development build, it therefore points at
+# target/debug/familiar — and would go on quietly running that binary after
+# this script replaced the installed one. Repointing it here is the difference
+# between "the shortcut is stale" and "the shortcut works but the app is a
+# fortnight old", which is a much worse thing to debug.
+BINDING="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/familiar/"
+MEDIA_KEYS="org.gnome.settings-daemon.plugins.media-keys"
+if command -v gsettings >/dev/null &&
+  gsettings list-schemas 2>/dev/null | grep -qx "$MEDIA_KEYS" &&
+  [[ "$(gsettings get "$MEDIA_KEYS" custom-keybindings)" == *"$BINDING"* ]]; then
+  say "Pointing the voice shortcut at $BIN_DIR/familiar"
+  gsettings set "$MEDIA_KEYS.custom-keybinding:$BINDING" command \
+    "$BIN_DIR/familiar --voice"
+fi
+
 if command -v gtk4-update-icon-cache >/dev/null; then
   gtk4-update-icon-cache -qtf "$DATA_DIR/icons/hicolor" 2>/dev/null || true
 elif command -v gtk-update-icon-cache >/dev/null; then

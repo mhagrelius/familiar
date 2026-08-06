@@ -7,6 +7,7 @@
 
 pub mod client;
 pub mod embedder;
+pub mod jobs_bus;
 
 mod application;
 mod approval;
@@ -24,6 +25,7 @@ mod staging;
 pub mod tool_detail;
 pub mod turn;
 mod turn_view;
+pub mod voice;
 mod window;
 pub mod workflow_bar;
 

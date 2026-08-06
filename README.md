@@ -194,6 +194,25 @@ editor, and "run the quarterly comparison workflow" starts it again. It will not
 save one uninvited, and it will tell you plainly when there is no saved workflow
 by the name you used rather than inventing what it thinks was in it.
 
+**Talk to it.** Press a shortcut anywhere — with the window closed, on another
+workspace, in the middle of something else — say what you want, and stop
+talking. Silence ends the utterance; there is nothing to hold down. What you
+said appears as you say it, the answer is read back a sentence at a time as the
+model writes it, and the whole thing lands in an ordinary chat that memory,
+schedules and the sidebar treat like any other. Ask again within eight minutes
+and it carries on the same chat; the window names the one it is continuing and
+starts a new one on request.
+
+Speech is recognised on this machine and no audio leaves it. The models are not
+shipped — `packaging/fetch-speech-models.sh` gets them, or Familiar reads
+[Scribe](https://github.com/mhagrelius/scribe)'s copy if that is installed.
+Answers are read back through speech-dispatcher, which is already on the
+desktop and sounds like it, or through Kokoro for a voice that sounds like a
+person — `packaging/speech-server.sh` runs one. **You can talk over it.** The
+microphone stays open while it thinks and while it speaks, so starting to talk
+stops the answer and takes the new question; say nothing for a few seconds and
+the conversation ends on its own. Everything else works without any of it.
+
 **Long chats keep working.** When a chat grows into the top of the context
 window — measured against what the server says the window is, not counted in
 turns — the older exchanges fold into a rolling summary written by the model
@@ -204,7 +223,8 @@ everything, and a note in the chat says what left the model's view.
 
 All twelve milestones are built. `web_search` and `fetch_url` are declared to
 the model but not connected to a provider — they say so rather than pretending
-— and packaging ships `install.sh` and a Flatpak manifest but no `.deb`.
+— and it installs with `./install.sh` into `~/.local`, which is the only way
+it is distributed.
 
 The document *tools* only write. To read a `.docx`, `.xlsx` or `.pptx` back,
 switch on the Python sandbox — it has the libraries, and with both on the
@@ -214,6 +234,14 @@ Mail has never run against a real server. The protocol and the transport are
 tested against a fake one, and the Gmail dialect is written from its
 documentation rather than from a session with it.
 
+Voice is **toggle, not push-to-talk**: the `GlobalShortcuts` portal is the only
+thing that hands out a key release, and on this desktop it refuses every caller
+without an application identity that a non-Flatpak app has no way to declare —
+measured, not assumed. The speech endpoint has been written and tested against
+its own request shape but never against a running Kokoro; the desktop voice
+has. The first build on a machine
+downloads an ONNX Runtime into `~/.cache`, so it needs the network once.
+
 ## Development
 
 ```sh
@@ -221,6 +249,9 @@ documentation rather than from a session with it.
 ./test.sh --headless   # the same under Xvfb
 
 packaging/build-sandbox.sh   # the image `run_python` runs in, once per machine
+packaging/fetch-speech-models.sh   # the speech models, once per machine
+
+cargo run --release --example hear -- some.wav     # the speech model, no window
 
 cargo run --example preview -- /tmp/preview        # the UI, painted offscreen
 cargo run --example ask -- "why is the sky blue?"  # the transport, no window
@@ -329,3 +360,26 @@ scenario, so read the per-scenario lines.
 
 It needs a `llama-server` to talk to and looks for one at
 `http://127.0.0.1:8080` unless Preferences says otherwise.
+
+### Voice
+
+Talking to it needs two more things, and neither is installed by `install.sh`:
+
+```sh
+packaging/fetch-speech-models.sh    # ~700 MB into ~/.local/share/familiar/models
+packaging/speech-server.sh          # optional: Kokoro, for a voice worth hearing
+```
+
+and a shortcut, which is switched on in **Preferences → Voice**. It is off
+until asked for: registering a system-wide key and opening a microphone on
+somebody's behalf at first launch is not a thing to do. The default is
+**Super+Alt+Space**, changed by pressing the keys you want.
+
+`pw-record` is needed to listen and comes with PipeWire — `pipewire-bin` on
+Debian and Ubuntu, `pipewire-utils` on Fedora. `spd-say` is needed to speak
+back and comes with speech-dispatcher, which is usually already there. Neither
+is a build dependency; both are checked for at the moment they are used and the
+Voice page says which is missing.
+
+`uninstall.sh` takes the shortcut back out. The models are left where they are;
+delete `~/.local/share/familiar/models` if you want the space back.

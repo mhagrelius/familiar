@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::thread::{Thread, ThreadError, ThreadId};
+use super::jobs::Jobs;
+use super::thread::{Heartbeat, Thread, ThreadError, ThreadId};
 use super::workflow::Workflow;
 
 /// The project that always exists: chats that belong to no project.
@@ -274,6 +275,68 @@ impl Store {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// `jobs.json` beside the projects.
+    ///
+    /// One file for the whole machine rather than one per project, because
+    /// "what is running?" is the question people ask and answering it should
+    /// not mean walking every project directory.
+    pub fn jobs_path(&self) -> PathBuf {
+        self.root.join("jobs.json")
+    }
+
+    /// Every job, or an empty list when there is no file yet.
+    ///
+    /// A file that will not parse comes back empty rather than as an error, on
+    /// the same principle the rest of the store follows: a machine with one bad
+    /// file should still start. It is not overwritten until something is saved,
+    /// so a hand edit with a typo in it can still be fixed by hand.
+    pub fn load_jobs(&self) -> Jobs {
+        let path = self.jobs_path();
+        let Ok(text) = fs::read_to_string(&path) else {
+            return Jobs::default();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    pub fn save_jobs(&self, jobs: &Jobs) -> Result<(), StoreError> {
+        let text = serde_json::to_string_pretty(jobs).map_err(|error| StoreError::Io {
+            path: self.jobs_path(),
+            source: std::io::Error::other(error),
+        })?;
+        write_atomically(&self.jobs_path(), &text)
+    }
+
+    /// Whether the machine has a jobs file at all.
+    ///
+    /// The migration runs only when it does not — otherwise every start would
+    /// re-import heartbeats the user has since deleted.
+    pub fn has_jobs_file(&self) -> bool {
+        self.jobs_path().exists()
+    }
+
+    /// Every schedule still living on a thread, for the one-time migration.
+    ///
+    /// Reads every thread of every project, which is why it happens once. The
+    /// heartbeat is left on the thread afterwards: a file an older build can
+    /// still open is worth more than a tidy one.
+    pub fn heartbeats(&self, slugs: &[String]) -> Vec<(String, String, Heartbeat)> {
+        let mut found = Vec::new();
+        for slug in slugs {
+            let Ok(summaries) = self.threads(slug) else {
+                continue;
+            };
+            for summary in summaries {
+                let Ok(thread) = self.load_thread(slug, &summary.id) else {
+                    continue;
+                };
+                if let Some(beat) = thread.heartbeat.clone() {
+                    found.push((slug.clone(), thread.id.to_string(), beat));
+                }
+            }
+        }
+        found
     }
 
     /// Rename the layout this one replaced.

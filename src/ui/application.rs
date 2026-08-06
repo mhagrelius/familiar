@@ -22,6 +22,9 @@ use crate::model::settings::{Config, Settings};
 use crate::model::thread::{StoredTurn, Thread, ThreadId};
 use crate::model::tools;
 use crate::model::turn::{Event, ToolCall, ToolOutcome, TurnState, TurnStream};
+/// The spoken half's pure logic. Aliased because `ui::voice` is its other half
+/// and both are wanted in this file.
+use crate::model::voice as spoken;
 use crate::model::web::Budget;
 use crate::model::wire::{ChatRequest, Message, ToolInvocation};
 use crate::ui::approval::{self, Decision};
@@ -29,6 +32,7 @@ use crate::ui::client::{Client, ClientError};
 use crate::ui::embedder::Embeddings;
 use crate::ui::preferences::{self, Preferences};
 use crate::ui::runner::Runner;
+use crate::ui::voice::{self, Recorder, Speaker, Speech, State, Talk, VoiceWindow};
 use crate::ui::{dialogs, Chip, TurnView, Window, WorkflowBar};
 use crate::APP_ID;
 
@@ -37,6 +41,20 @@ use crate::APP_ID;
 /// Long enough that a follow-up typed straight away goes first, short enough
 /// that closing the window seldom loses the read.
 const HARVEST_DELAY: u32 = 5;
+
+/// How long a spoken question may sit being transcribed before something is
+/// assumed to have gone wrong. The pass itself is a quarter of a second.
+const TRANSCRIBE_PATIENCE: u32 = 20_000;
+
+/// How long to listen with no audio arriving at all before deciding the
+/// microphone is not going to produce any. Reads come every 40 ms, so this is
+/// three orders of magnitude of grace.
+const DEAF_MICROPHONE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// And how long it may sit being answered. Long, because a turn that calls
+/// four tools legitimately takes minutes — this is a backstop against a turn
+/// that is not running at all, not a limit on how long an answer may take.
+const THINK_PATIENCE: u32 = 300_000;
 
 /// How long the nightly pass waits when it finds a turn in flight.
 const DREAM_YIELD: u32 = 30;
@@ -108,6 +126,39 @@ fn refused_for_budget(call: &ToolCall) -> bool {
 
 /// A turn in flight. Dropped when it settles, which is also what makes a second
 /// submission while one is running impossible to get wrong.
+/// Which chat a running turn belongs to.
+///
+/// The open chat's state stays in the application's slot, where the tools that
+/// mutate it mid-turn — `schedule` writes `heartbeat`, `workflow` writes
+/// `workflow` — already write, and where the sidebar reads it. Only a run
+/// against a chat that is *not* open needs the turn to carry its own, and that
+/// is the whole difference between the two arms.
+pub enum Chat {
+    Open,
+    /// Boxed because a `Thread` is large and the open case carries none.
+    Background(Box<Thread>),
+}
+
+/// The chat a turn is running against, and the widget showing it if one is.
+///
+/// A scheduled run happens against a thread that is usually not open and may
+/// have no window at all, so the turn carries what it needs rather than
+/// reading the application's slot. That is what lets a run happen in the
+/// background without either freezing navigation for its duration or writing
+/// the answer into whatever chat the user has since clicked on.
+///
+/// The project rides along because [`Application::build_request`] needs it —
+/// tools, instructions and workspace are the project's, and a job's project is
+/// not necessarily the open one either.
+pub struct Session {
+    pub slug: String,
+    pub project: Project,
+    pub chat: Chat,
+    /// `None` for a background run: there is no turn widget, and there may be
+    /// no window at all.
+    pub view: Option<Rc<TurnView>>,
+}
+
 pub struct InFlight {
     pub question: String,
     /// Documents whose text was extracted, framed and ready to go into the
@@ -117,7 +168,9 @@ pub struct InFlight {
     /// the model can still see them when it reads its tool results.
     pub images: Vec<Attachment>,
     pub stream: TurnStream,
-    pub view: Rc<TurnView>,
+    /// The chat this turn belongs to. Not `imp.thread`, because a scheduled
+    /// run's chat is usually not the open one.
+    pub session: Session,
     pub cancellable: gio::Cancellable,
     /// What has already been said and done this turn, across tool rounds. A
     /// turn that calls a tool is several requests, and this is what makes them
@@ -158,6 +211,16 @@ pub struct InFlight {
     /// The clock started this turn, not a person. Decides whether the answer
     /// is announced, and what the thread records about the run.
     pub scheduled: bool,
+    /// The job this turn is a run of, if it is one. What its outcome is
+    /// recorded against — the job outlives the chat, so "what happened last
+    /// time" belongs on the job rather than on whichever thread it wrote into.
+    pub job: Option<String>,
+    /// The question was spoken and the answer will be read out.
+    ///
+    /// Two things follow from it and nothing else does: the question carries
+    /// `voice::REGISTER`, and the answer is fed to the voice window and the
+    /// synthesiser as it streams. The turn is otherwise an ordinary turn.
+    pub spoken: bool,
 }
 
 mod imp {
@@ -178,6 +241,19 @@ mod imp {
         /// The open thread, including turns not yet written out.
         pub thread: RefCell<Thread>,
         pub in_flight: RefCell<Option<InFlight>>,
+        /// Where the job interface is exported, once it has been. `None` when
+        /// there is no session bus, which is an ordinary state — every surface
+        /// is optional by construction.
+        pub bus_path: RefCell<Option<String>>,
+        /// Holds the process open with no window while it exists; dropping it
+        /// lets the app end when its last window closes. Kept rather than
+        /// leaked so background running can be switched off again without a
+        /// restart.
+        pub held: RefCell<Option<gio::ApplicationHoldGuard>>,
+        /// Everything that runs on its own. Loaded once at startup, migrated
+        /// from the heartbeats threads used to carry if there is no file yet,
+        /// and written whenever one changes.
+        pub jobs: RefCell<crate::model::jobs::Jobs>,
         pub window: RefCell<Option<Window>>,
         /// Brain's vault. `None` until one is configured, which is a state the
         /// tools report honestly rather than papering over.
@@ -214,6 +290,28 @@ mod imp {
         /// The nightly consolidation is running. A pass is many requests over
         /// several minutes and must not be started twice by two ticks.
         pub dreaming: Cell<bool>,
+        /// The spoken exchange and its window, once the shortcut has been
+        /// pressed once. `None` until then: building it loads nothing and
+        /// costs nothing, but the window is one more thing to keep in step and
+        /// most sessions never talk.
+        pub talk: RefCell<Option<Talk>>,
+        /// The speech worker. Created with the first utterance, not at startup:
+        /// it loads most of a gigabyte of ONNX and a session that never speaks
+        /// should never pay for it.
+        pub speech: RefCell<Option<Rc<Speech>>>,
+        /// What reads the answer out.
+        pub speaker: RefCell<Option<Rc<Speaker>>>,
+        /// Holds the process open while the voice window is on screen, and
+        /// only then.
+        ///
+        /// The window is *not* the application's, deliberately. It is hidden
+        /// rather than destroyed between exchanges — rebuilding it would lose
+        /// its size and flicker — and a hidden window that belongs to the
+        /// application still counts as a window, so `GtkApplication` never
+        /// reaches zero and the app cannot quit. Closing the main window then
+        /// leaves a process nobody can see and nobody can end. A hold guard
+        /// says the same thing exactly and only while it is true.
+        pub voice_hold: RefCell<Option<gio::ApplicationHoldGuard>>,
     }
 
     impl Default for Project {
@@ -248,6 +346,12 @@ mod imp {
             // one whose embedding server was down last time, has to be caught
             // up by something, and nothing here waits on it.
             obj.catch_up_vectors();
+            // Before the tick starts, or the first one runs against an empty
+            // list and a schedule that was due while the machine was off would
+            // be missed by the very pass meant to recover it.
+            obj.load_jobs();
+            obj.export_jobs();
+            obj.apply_background();
             obj.start_heartbeat();
         }
 
@@ -294,6 +398,22 @@ mod imp {
         /// of an already-running instance.
         fn command_line(&self, command_line: &gio::ApplicationCommandLine) -> glib::ExitCode {
             let obj = self.obj();
+            let arguments: Vec<String> = command_line
+                .arguments()
+                .iter()
+                .map(|argument| argument.to_string_lossy().to_string())
+                .collect();
+
+            // The global shortcut, arriving as a second launch. It deliberately
+            // does *not* activate: the point of talking to it is that the main
+            // window need not be open, and raising it over whatever the user is
+            // working in would make the shortcut something to think twice about
+            // pressing. The voice window is the only thing that appears.
+            if arguments.iter().any(|argument| argument == "--voice") {
+                obj.toggle_voice();
+                return glib::ExitCode::SUCCESS;
+            }
+
             // Activating first means the window exists before anything is asked
             // of it, whether this is the first launch or the fifth.
             obj.activate();
@@ -314,6 +434,17 @@ mod imp {
 
         fn shutdown(&self) {
             let obj = self.obj();
+            // Before anything else: speech-dispatcher keeps speaking after the
+            // process that asked it to is gone, so quitting mid-sentence would
+            // leave a voice talking to an empty desktop.
+            if let Some(speaker) = self.speaker.borrow().as_ref() {
+                speaker.hush();
+            }
+            // The voice window belongs to no application, so nothing else will
+            // take it down.
+            if let Some(talk) = self.talk.borrow().as_ref() {
+                talk.window.destroy();
+            }
             obj.remember_window();
             obj.save_thread();
             self.parent_shutdown();
@@ -388,6 +519,16 @@ impl Application {
             }
         ));
         self.add_action(&show_thread);
+
+        // The same thing the global shortcut does, for the menu and for a
+        // desktop where no shortcut could be registered.
+        let voice = gio::SimpleAction::new("voice", None);
+        voice.connect_activate(clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_, _| app.toggle_voice()
+        ));
+        self.add_action(&voice);
 
         // The window that lists every scheduled thread, so one can be paused,
         // edited or deleted without hunting through the sidebar for it.
@@ -753,7 +894,13 @@ impl Application {
             let _ = settings.save(&imp.settings_path.borrow());
             return;
         }
-        if schedule.due(last, now).is_none() {
+        // Consolidation keeps the behaviour it has always had: if the machine
+        // was off through three o'clock, the night is let go rather than run
+        // over breakfast against the same GPU the conversation wants.
+        if schedule
+            .due(last, now, crate::model::heartbeat::Recovery::OnTime)
+            .is_none()
+        {
             return;
         }
         // Recorded before the pass rather than after: if it never finishes, the
@@ -1420,6 +1567,17 @@ impl Application {
             window.toast("Could not delete that chat");
             return;
         }
+        // Any job landing here goes with it. A job pointing at a chat that is
+        // gone would run forever against nothing, writing turns nobody can
+        // reach — and its prompt was in the file being deleted anyway.
+        let orphaned = self
+            .imp()
+            .jobs
+            .borrow_mut()
+            .forget_chat(slug, &id.to_string());
+        if orphaned > 0 {
+            self.save_jobs();
+        }
 
         // Deleting what is open leaves a fresh chat in its place rather than
         // an empty screen with no way back — and emphatically does not save the
@@ -1675,6 +1833,11 @@ impl Application {
                         }
                         return;
                     }
+                    // Every job belonging to it goes too, for the same reason a
+                    // deleted chat takes its jobs: the destination is gone.
+                    if app.imp().jobs.borrow_mut().forget_project(&slug) > 0 {
+                        app.save_jobs();
+                    }
                     app.enter_project(DEFAULT_PROJECT);
                     app.refresh_threads();
                     app.open_latest_thread();
@@ -1861,7 +2024,7 @@ impl Application {
     }
 
     fn save_thread(&self) {
-        let (Some(store), Some(window)) = (self.store(), self.window()) else {
+        let Some(store) = self.store() else {
             return;
         };
         let slug = self.imp().project.borrow().slug.clone();
@@ -1869,8 +2032,12 @@ impl Application {
         if let Err(error) = store.save_thread(&slug, &thread) {
             // Losing what was said is worth a banner, not a toast: a toast is
             // missed while typing and the cost of missing it is the
-            // conversation.
-            window.set_trouble(Some(&format!("This chat is not being saved: {error}")));
+            // conversation. Only if there is a window to put one in — the save
+            // itself must not depend on that, or a background run would write
+            // nothing at all and report no error either.
+            if let Some(window) = self.window() {
+                window.set_trouble(Some(&format!("This chat is not being saved: {error}")));
+            }
         }
     }
 
@@ -1900,16 +2067,300 @@ impl Application {
         );
     }
 
+    /// The thread the running turn belongs to.
+    ///
+    /// Everything in the turn path goes through this rather than reaching for
+    /// `imp.thread` directly, and so does every tool that writes to the thread
+    /// — `schedule` and `workflow` both do. Without it a scheduled run against
+    /// a chat that is not open would set its schedule, or append its answer, to
+    /// whichever chat happened to be on screen.
+    ///
+    /// Falls through to the open chat when no turn is running, or when the one
+    /// that is belongs to the open chat anyway, which is the ordinary case.
+    fn with_turn_thread<R>(&self, f: impl FnOnce(&mut Thread) -> R) -> R {
+        {
+            let mut in_flight = self.imp().in_flight.borrow_mut();
+            if let Some(Chat::Background(thread)) =
+                in_flight.as_mut().map(|turn| &mut turn.session.chat)
+            {
+                return f(thread);
+            }
+        }
+        f(&mut self.imp().thread.borrow_mut())
+    }
+
+    /// Write out the running turn's chat, whichever chat that is.
+    ///
+    /// The counterpart to [`Self::with_turn_thread`], and needed for the same
+    /// reason: a tool that changes the thread has to persist the one it
+    /// changed. `save_thread` only ever writes the slot.
+    fn save_turn_thread(&self) {
+        let background = {
+            let mut in_flight = self.imp().in_flight.borrow_mut();
+            match in_flight.as_mut().map(|turn| &mut turn.session) {
+                Some(Session {
+                    slug,
+                    chat: Chat::Background(thread),
+                    ..
+                }) => Some((slug.clone(), thread.clone())),
+                _ => None,
+            }
+        };
+        match background {
+            Some((slug, thread)) => {
+                if let Some(store) = self.store() {
+                    let _ = store.save_thread(&slug, &thread);
+                }
+            }
+            None => self.save_thread(),
+        }
+    }
+
+    /// Which chat the running turn belongs to, as a job's destination names it.
+    fn turn_chat(&self) -> (String, String) {
+        {
+            let in_flight = self.imp().in_flight.borrow();
+            if let Some(turn) = in_flight.as_ref() {
+                if let Chat::Background(thread) = &turn.session.chat {
+                    return (turn.session.slug.clone(), thread.id.to_string());
+                }
+            }
+        }
+        (
+            self.imp().project.borrow().slug.clone(),
+            self.imp().thread.borrow().id.to_string(),
+        )
+    }
+
+    /// Which chat a settling turn belonged to, as a name that outlives it.
+    ///
+    /// The session is gone by the time an asynchronous fold comes back, so what
+    /// travels is the pair that identifies the chat rather than the chat.
+    fn session_chat(&self, session: &mut Session) -> (String, ThreadId) {
+        let id = self.with_session_thread(session, |thread| thread.id.clone());
+        (session.slug.clone(), id)
+    }
+
+    /// A background run has finished for the chat that happens to be on screen.
+    ///
+    /// The run itself was no different — that is the point of not special-casing
+    /// the open chat — but the slot and the widgets have to catch up. Without
+    /// this the application's copy is missing the run, and the next thing the
+    /// user sends writes that stale copy back over the file, losing it.
+    fn adopt_background_turn(&self, session: &Session) {
+        let Chat::Background(thread) = &session.chat else {
+            return;
+        };
+        let mine = self.imp().project.borrow().slug == session.slug
+            && self.imp().thread.borrow().id == thread.id;
+        if !mine {
+            return;
+        }
+        self.imp().thread.replace((**thread).clone());
+
+        // Appended rather than redrawn: `show_thread` also navigates, and a run
+        // finishing must not yank somebody off the project page they are
+        // reading.
+        let Some(window) = self.window() else {
+            return;
+        };
+        if window.showing_project() {
+            return;
+        }
+        let show_thinking = self.imp().settings.borrow().show_thinking;
+        let last = self.imp().thread.borrow().turns().last().cloned();
+        if let Some(turn) = last {
+            let view = TurnView::replayed_with(&turn, show_thinking, &self.images_of(&turn));
+            window.conversation().append(view.widget());
+        }
+    }
+
+    /// The same, for a turn being settled — by then the turn has been taken out
+    /// of its cell, so the session is passed in rather than looked up.
+    fn with_session_thread<R>(&self, session: &mut Session, f: impl FnOnce(&mut Thread) -> R) -> R {
+        match &mut session.chat {
+            Chat::Background(thread) => f(thread),
+            Chat::Open => f(&mut self.imp().thread.borrow_mut()),
+        }
+    }
+
+    /// Write the session's chat out, whichever chat that is.
+    fn save_session(&self, session: &mut Session) {
+        match &mut session.chat {
+            Chat::Open => self.save_thread(),
+            Chat::Background(thread) => {
+                let Some(store) = self.store() else {
+                    eprintln!("familiar: no store, so a finished turn was not written");
+                    return;
+                };
+                // Said rather than swallowed. This is the last step of a turn
+                // that has already been paid for, and losing it silently is
+                // the worst way to lose it.
+                if let Err(error) = store.save_thread(&session.slug, thread) {
+                    eprintln!("familiar: a finished chat could not be written: {error}");
+                }
+            }
+        }
+    }
+
+    /// Load the job list, importing the old per-thread heartbeats once.
+    ///
+    /// The import happens only when there is no jobs file, or every start would
+    /// resurrect schedules the user has since deleted. `last_run` carries over
+    /// with everything else — a migration that reset the clock would make every
+    /// schedule on the machine come due at once.
+    fn load_jobs(&self) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        if store.has_jobs_file() {
+            self.imp().jobs.replace(store.load_jobs());
+            return;
+        }
+        let slugs: Vec<String> = self
+            .imp()
+            .projects
+            .borrow()
+            .iter()
+            .map(|project| project.slug.clone())
+            .collect();
+        let migrated = crate::model::jobs::Jobs::migrated(store.heartbeats(&slugs));
+        let _ = store.save_jobs(&migrated);
+        self.imp().jobs.replace(migrated);
+    }
+
+    /// Write the job list out, and tell every watcher.
+    ///
+    /// The announcement rides with the save rather than being a separate call
+    /// at each site, because "the list changed" and "the list was written" are
+    /// the same moment — and a surface that missed one would be showing a
+    /// schedule the file no longer agrees with.
+    fn save_jobs(&self) {
+        if let Some(store) = self.store() {
+            let _ = store.save_jobs(&self.imp().jobs.borrow());
+        }
+        self.announce_jobs();
+    }
+
+    /// Keep the process alive with no window, if that was asked for.
+    ///
+    /// `gio::Application` ends when its last window closes, which for a
+    /// scheduled assistant means the schedules only run while somebody is
+    /// looking at it — the thing the background run was built to stop being
+    /// true. The hold guard is the counterweight; dropping it gives the
+    /// ordinary lifetime back.
+    ///
+    /// **Conditional, and it has to be.** `test.sh` drives the real application
+    /// through integration tests; an unconditional hold means they never
+    /// terminate. `FAMILIAR_NO_BACKGROUND` is the same kind of guard as
+    /// `GTK_A11Y=none` and `GSETTINGS_BACKEND=memory` — a test must never
+    /// depend on, or be trapped by, real user state.
+    fn apply_background(&self) {
+        let wanted = self.imp().settings.borrow().background
+            && std::env::var("FAMILIAR_NO_BACKGROUND").is_err();
+        let held = self.imp().held.borrow().is_some();
+        if wanted == held {
+            return;
+        }
+        if wanted {
+            let guard = gio::prelude::ApplicationExtManual::hold(self);
+            self.imp().held.replace(Some(guard));
+        } else {
+            self.imp().held.replace(None);
+        }
+    }
+
+    /// Put the job list on the bus the application already owns.
+    ///
+    /// Costs a vtable rather than a subsystem: `GApplication` has a connection
+    /// and a bus name by the time this runs. A surface — a shell extension, a
+    /// tray, a script — reads it here and never reaches into the app.
+    fn export_jobs(&self) {
+        let Some(connection) = self.dbus_connection() else {
+            // No session bus. Every surface is optional by construction, so
+            // this is a missing convenience rather than a failure.
+            return;
+        };
+        let path = format!("{}/Jobs", self.dbus_object_path().unwrap_or_default());
+        let registered = crate::ui::jobs_bus::export(
+            &connection,
+            &path,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                None,
+                move |ask| {
+                    use crate::ui::jobs_bus::Ask;
+                    let now = chrono::Local::now();
+                    match ask {
+                        Ask::List => Some(crate::ui::jobs_bus::describe_all(
+                            &app.imp().jobs.borrow(),
+                            now,
+                        )),
+                        Ask::SetEnabled { id, on } => {
+                            let found = app.imp().jobs.borrow().get(&id).is_some();
+                            if found {
+                                app.edit_job(&id, move |job| job.enabled = on);
+                                app.announce_jobs();
+                            }
+                            Some(found.to_variant())
+                        }
+                        // Bringing a run forward is setting its clock back far
+                        // enough that the next tick finds it owed — rather than
+                        // a second path into the turn pipeline, which would be
+                        // a way to start two runs at once.
+                        Ask::RunNow { id } => {
+                            let known = app.imp().jobs.borrow().get(&id).is_some();
+                            if known {
+                                app.edit_job(&id, |job| {
+                                    job.last_run =
+                                        Some(chrono::Utc::now() - chrono::Duration::days(400));
+                                    job.recovery = crate::model::heartbeat::Recovery::Whenever;
+                                });
+                                app.announce_jobs();
+                            }
+                            Some(known.to_variant())
+                        }
+                    }
+                }
+            ),
+        );
+        if registered.is_ok() {
+            self.imp().bus_path.replace(Some(path));
+        }
+    }
+
+    /// Tell every watcher the list changed.
+    ///
+    /// The push half of push-never-poll. Called wherever a job is added,
+    /// edited, paused, deleted or finishes a run, so a panel never needs a
+    /// timer of its own.
+    fn announce_jobs(&self) {
+        let (Some(connection), Some(path)) =
+            (self.dbus_connection(), self.imp().bus_path.borrow().clone())
+        else {
+            return;
+        };
+        let now = chrono::Local::now();
+        let jobs = self.imp().jobs.borrow();
+        crate::ui::jobs_bus::changed(
+            &connection,
+            &path,
+            &crate::ui::jobs_bus::describe_all(&jobs, now),
+            crate::ui::jobs_bus::overdue(&jobs, now),
+        );
+    }
+
     /// One tick: is anything due, and can it run right now?
     ///
-    /// Only the open thread is woken. A schedule on a thread that is not open
-    /// is noticed the next time it is opened — running a turn against a thread
-    /// that is not loaded would mean a second conversation pipeline, and the
-    /// whole point of putting the schedule on the thread was to avoid that.
+    /// Every job is considered the same way, whatever is front and center. A
+    /// scheduled run is a background run — routing the open chat through
+    /// `submit_turn` instead took the composer's staging area with it, so a
+    /// schedule coming due would swallow a file you had attached and not sent.
     fn tick(&self) {
-        // Never mid-answer. A scheduled run fires *between* turns, so it never
-        // interleaves with something the user is watching — and the next tick
-        // is a minute away, well inside the grace window.
+        // Never mid-answer. A scheduled run fires *between* turns, and one model
+        // call at a time is the policy against a single local server.
         if self.imp().in_flight.borrow().is_some() {
             return;
         }
@@ -1918,53 +2369,126 @@ impl Application {
         // uses, and a person waiting on an answer must not queue behind it.
         self.dream_if_due();
         self.look_out_if_due();
-        let now = chrono::Local::now();
-        let Some((due, prompt)) =
-            self.imp()
-                .thread
-                .borrow()
-                .heartbeat
-                .as_ref()
-                .and_then(|heartbeat| {
-                    heartbeat
-                        .due(now)
-                        .map(|due| (due, heartbeat.prompt.clone()))
-                })
-        else {
-            return;
-        };
-        if prompt.trim().is_empty() {
-            return;
-        }
         // The server being down is a reason to wait for the next occurrence,
         // not to submit a turn that will fail.
         if self.imp().client.borrow().is_none() {
             return;
         }
 
-        // Recorded before the turn rather than after: if the answer never
-        // arrives, the schedule must still have moved on, or every tick for
-        // the next twenty minutes tries again.
-        let scheduled = {
-            let mut thread = self.imp().thread.borrow_mut();
-            let Some(heartbeat) = thread.heartbeat.as_mut() else {
-                return;
-            };
-            let scheduled = heartbeat
-                .last_run
-                .map(|last| {
-                    heartbeat
-                        .schedule
-                        .next_after(last.with_timezone(&chrono::Local))
-                })
-                .unwrap_or(now);
-            heartbeat.last_run = Some(chrono::Utc::now());
-            scheduled
+        // One per tick, most overdue first: the next is a minute away, and
+        // starting two would put them both on the same GPU.
+        let now = chrono::Local::now();
+        let owed = self
+            .imp()
+            .jobs
+            .borrow()
+            .next_due(now)
+            .map(|(job, due, scheduled)| (job.clone(), due, scheduled));
+        let Some((job, due, scheduled)) = owed else {
+            return;
         };
-        self.save_thread();
+        let Some((slug, project, thread)) = self.chat_for(&job) else {
+            return;
+        };
+
+        // Recorded before the turn rather than after: if the answer never
+        // arrives the schedule must still have moved on, or every tick inside
+        // the window tries again.
+        if let Some(held) = self.imp().jobs.borrow_mut().get_mut(&job.id) {
+            held.last_run = Some(chrono::Utc::now());
+        }
+        self.save_jobs();
 
         let preamble = crate::model::heartbeat::preamble(due, scheduled);
-        self.submit_turn(&format!("{preamble}\n\n{prompt}"), true);
+        self.run_in_background(
+            slug,
+            project,
+            thread,
+            format!("{preamble}\n\n{}", job.prompt),
+            Some(job.id.clone()),
+        );
+    }
+
+    /// The chat a job writes into, loading or creating it as its destination
+    /// says.
+    ///
+    /// `None` when the job points at a project that is gone — the list is
+    /// pruned when a project or chat is deleted, but a store edited by hand or
+    /// synced from elsewhere can still say otherwise, and running a job against
+    /// nothing would write turns nobody can reach.
+    fn chat_for(&self, job: &crate::model::jobs::Job) -> Option<(String, Project, Thread)> {
+        use crate::model::jobs::Destination;
+        let store = self.store()?;
+        let slug = job.destination.slug()?.to_string();
+        let project = self
+            .imp()
+            .projects
+            .borrow()
+            .iter()
+            .find(|project| project.slug == slug)
+            .cloned()?;
+        match &job.destination {
+            Destination::Chat { thread, .. } => {
+                let id = crate::model::thread::ThreadId::from_stem(thread)?;
+                // The open chat's in-memory copy wins: the file may be a turn
+                // behind whatever the user has just said.
+                let open =
+                    self.imp().project.borrow().slug == slug && self.imp().thread.borrow().id == id;
+                let thread = if open {
+                    self.imp().thread.borrow().clone()
+                } else {
+                    store.load_thread(&slug, &id).ok()?
+                };
+                Some((slug, project, thread))
+            }
+            // A run of its own each time. The chat is created here rather than
+            // at settle, so the turn has somewhere to go from the first round.
+            Destination::FreshChat { .. } => {
+                let thread = store.new_thread(&slug).ok()?;
+                Some((slug, project, thread))
+            }
+            Destination::Nothing => None,
+        }
+    }
+
+    fn run_in_background(
+        &self,
+        slug: String,
+        project: Project,
+        thread: Thread,
+        question: String,
+        job: Option<String>,
+    ) {
+        if self.imp().in_flight.borrow().is_some() {
+            return;
+        }
+        self.imp().in_flight.replace(Some(InFlight {
+            question,
+            documents: Vec::new(),
+            images: Vec::new(),
+            stream: TurnStream::new(),
+            session: Session {
+                slug,
+                project,
+                chat: Chat::Background(Box::new(thread)),
+                view: None,
+            },
+            cancellable: gio::Cancellable::new(),
+            answer: String::new(),
+            thinking: String::new(),
+            calls: Vec::new(),
+            rounds: 0,
+            retried: false,
+            floor: false,
+            fold: None,
+            shrinks: 0,
+            exchanges: Vec::new(),
+            approved_something: false,
+            scheduled: true,
+            job,
+            spoken: false,
+        }));
+        self.ask(None);
     }
 
     // -- the lookout ----------------------------------------------------------
@@ -1980,11 +2504,11 @@ impl Application {
     /// Most of the time it says nothing and nothing happens, which is the
     /// design rather than a disappointment. See `model::lookout`.
     fn look_out_if_due(&self) {
-        let (enabled, hours, last) = {
+        let (enabled, schedule, last) = {
             let settings = self.imp().settings.borrow();
             (
                 settings.lookout,
-                settings.lookout_hours.max(1),
+                settings.lookout_schedule(),
                 settings.last_lookout,
             )
         };
@@ -1992,8 +2516,33 @@ impl Application {
             return;
         }
         let now = chrono::Utc::now();
-        if let Some(last) = last {
-            if now - last < chrono::Duration::hours(i64::from(hours)) {
+        // Through the same arithmetic as everything else that runs on its own,
+        // rather than a raw hours comparison — that was a third notion of
+        // "due", and the one that had never been asked what to do about a
+        // machine that was asleep. `Whenever`: a check that says nothing five
+        // times in nine is worth doing late, and there is nothing stale about
+        // "look over the day".
+        let local = now.with_timezone(&chrono::Local);
+        match last {
+            Some(last) => {
+                if schedule
+                    .due(
+                        Some(last.with_timezone(&chrono::Local)),
+                        local,
+                        crate::model::heartbeat::Recovery::Whenever,
+                    )
+                    .is_none()
+                {
+                    return;
+                }
+            }
+            // Never run: start the clock rather than firing immediately, the
+            // same rule a scheduled chat follows.
+            None => {
+                let imp = self.imp();
+                let mut settings = imp.settings.borrow_mut();
+                settings.last_lookout = Some(now);
+                let _ = settings.save(&imp.settings_path.borrow());
                 return;
             }
         }
@@ -2164,14 +2713,1154 @@ impl Application {
     /// shade rather than stacking a week of them — and a default action that
     /// opens the thread it ran in, which works even if the app has since
     /// exited, because the desktop file is `DBusActivatable`.
-    fn announce_run(&self, title: &str, summary: &str) {
+    fn announce_run(&self, id: &str, title: &str, summary: &str) {
         let notification = gio::Notification::new(title);
         notification.set_body(Some(summary));
         notification.set_priority(gio::NotificationPriority::Normal);
 
-        let id = self.imp().thread.borrow().id.to_string();
+        // The chat that ran, which is not necessarily the one on screen. Read
+        // from the slot, this opened whatever the user was looking at when a
+        // background run finished.
         notification.set_default_action_and_target_value("app.show-thread", Some(&id.to_variant()));
         self.send_notification(Some(&format!("heartbeat:{id}")), &notification);
+    }
+
+    // -- talking to it --------------------------------------------------------
+
+    /// The global shortcut, `familiar --voice`, or the menu item.
+    ///
+    /// One gesture, and what it means is the state it finds. Pressing it while
+    /// it is talking stops it talking and starts listening, which is what
+    /// interrupting somebody is; pressing it while it is thinking stops the
+    /// turn. There is no second key to learn because there is no second key to
+    /// register — see `voice::shortcut`.
+    pub fn toggle_voice(&self) {
+        // Whether the window was already on screen decides what a press means.
+        // A hidden window's state is not something anybody can see, so the
+        // press cannot sensibly mean "stop that" — it means start. Without
+        // this, a state left over from the last exchange eats the first press
+        // and the window opens sitting there doing nothing.
+        let showing = self
+            .voice_window()
+            .is_some_and(|window| window.is_visible());
+        if !self.open_talk() {
+            return;
+        }
+        if !showing {
+            self.cancel_voice();
+            self.start_listening();
+            return;
+        }
+        match self.voice_state() {
+            State::Idle => self.start_listening(),
+            State::Listening => self.stop_listening(true),
+            // The accurate pass takes a fifth of a second. Pressing through it
+            // means "no, forget it" rather than "hurry up".
+            State::Transcribing => self.cancel_voice(),
+            State::Thinking => {
+                self.stop();
+                self.abandon();
+                self.go_idle();
+            }
+            // Interrupting. The answer stays on screen and in the chat; what
+            // stops is the reading of it.
+            State::Speaking => {
+                self.speaker().hush();
+                self.start_listening();
+            }
+        }
+    }
+
+    /// Make sure the window exists and is on screen. False if voice cannot run.
+    fn open_talk(&self) -> bool {
+        if self.imp().talk.borrow().is_some() {
+            let talk = self.imp().talk.borrow();
+            let window = talk.as_ref().expect("just checked").window.clone();
+            drop(talk);
+            self.hold_for_voice();
+            window.present();
+            return true;
+        }
+
+        let window = VoiceWindow::new();
+        window.connect_local(
+            "act",
+            false,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                None,
+                move |_| {
+                    app.toggle_voice();
+                    None
+                }
+            ),
+        );
+        window.connect_local(
+            "cancel",
+            false,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                None,
+                move |_| {
+                    app.cancel_voice();
+                    None
+                }
+            ),
+        );
+        window.connect_local(
+            "fresh",
+            false,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                None,
+                move |_| {
+                    app.fresh_voice_chat();
+                    None
+                }
+            ),
+        );
+        window.connect_local(
+            "open",
+            false,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                None,
+                move |_| {
+                    app.show_voice_chat();
+                    None
+                }
+            ),
+        );
+        // Closing it is cancelling it, and on a machine where nothing else is
+        // holding the process open — no main window, no background running —
+        // it is also quitting. Without that, a cold start from the shortcut
+        // would leave a process with no visible window behind every time.
+        window.connect_close_request(clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_| {
+                app.cancel_voice();
+                // Letting go is the whole of it. With no main window and
+                // nothing else holding the process, the application ends by
+                // itself; with one, it carries on. No special case either way.
+                app.imp().voice_hold.replace(None);
+                glib::Propagation::Proceed
+            }
+        ));
+
+        crate::voice_log!("this build: {}", crate::built_at());
+        let talk = Talk::new(window.clone());
+        self.imp().talk.replace(Some(talk));
+        window.set_state(State::Idle);
+        window.set_chat(None);
+        self.hold_for_voice();
+        window.present();
+        true
+    }
+
+    /// Keep the process alive while the voice window is up.
+    fn hold_for_voice(&self) {
+        if self.imp().voice_hold.borrow().is_none() {
+            self.imp().voice_hold.replace(Some(self.hold()));
+        }
+    }
+
+    /// The speech worker, started on first use.
+    fn speech(&self) -> Rc<Speech> {
+        let existing = self.imp().speech.borrow().clone();
+        existing.unwrap_or_else(|| {
+            let speech = Rc::new(Speech::new());
+            self.imp().speech.replace(Some(speech.clone()));
+            speech
+        })
+    }
+
+    /// What reads the answer out.
+    ///
+    /// Which voice it uses is settled once per exchange by [`Self::start_listening`]
+    /// and not looked at again: this is called for every delta of the answer,
+    /// and deciding the voice involves searching the `PATH` for a synthesiser.
+    /// Preferences changed mid-answer apply to the next question.
+    fn speaker(&self) -> Rc<Speaker> {
+        let existing = self.imp().speaker.borrow().clone();
+        existing.unwrap_or_else(|| {
+            let speaker = Rc::new(Speaker::new());
+            speaker.connect_changed(clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |speaking| app.voice_is_speaking(speaking)
+            ));
+            self.imp().speaker.replace(Some(speaker.clone()));
+            speaker
+        })
+    }
+
+    /// The voice the preferences ask for, or silence if it cannot be used.
+    fn chosen_voice(&self) -> voice::Voice {
+        let settings = self.imp().settings.borrow();
+        let wanted = match settings.voice_reply.as_str() {
+            "off" => voice::Voice::Silent,
+            "endpoint" => voice::Voice::Endpoint {
+                url: settings.voice_endpoint.clone(),
+                name: settings.voice_name.clone(),
+                rate: settings.voice_rate,
+            },
+            _ => voice::Voice::Desktop,
+        };
+        if wanted.is_available() {
+            wanted
+        } else {
+            // The answer is on screen either way. Silence beats a stream of
+            // failures, one per sentence.
+            voice::Voice::Silent
+        }
+    }
+
+    fn voice_state(&self) -> State {
+        self.imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .map(|talk| talk.window.state())
+            .unwrap_or(State::Idle)
+    }
+
+    fn voice_window(&self) -> Option<VoiceWindow> {
+        self.imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .map(|talk| talk.window.clone())
+    }
+
+    /// Open the microphone because somebody asked for it.
+    fn start_listening(&self) {
+        self.listen(false);
+    }
+
+    /// Open it again after an answer, so the conversation can carry on without
+    /// a key being pressed between every question.
+    ///
+    /// This is what makes it a conversation rather than a series of
+    /// dictations, and it costs nothing to leave: say nothing and the
+    /// endpointer gives up after its patience runs out and the window goes
+    /// quiet. The microphone is only ever open *after* the speaking has
+    /// finished, so there is still nothing for it to hear itself say.
+    fn carry_on_listening(&self) {
+        if !self.imp().settings.borrow().voice_converse {
+            return;
+        }
+        // Not over a window somebody has closed, and not over a turn that has
+        // somehow started since.
+        let showing = self
+            .voice_window()
+            .is_some_and(|window| window.is_visible());
+        // And only from a standstill. Listening again while already listening
+        // would empty the buffer somebody is halfway through talking into.
+        if !showing || self.imp().in_flight.borrow().is_some() || self.voice_state() != State::Idle
+        {
+            return;
+        }
+        self.listen(true);
+    }
+
+    fn listen(&self, carrying_on: bool) {
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+        let speaker = self.speaker();
+        speaker.hush();
+        // Once per exchange, which is where a preference change takes effect.
+        let voice = self.chosen_voice();
+        crate::voice_log!("voice: {voice:?}");
+        speaker.set_voice(voice);
+
+        if !voice::speech::is_installed() {
+            window.set_state(State::Idle);
+            window.set_trouble(voice::speech::MISSING);
+            return;
+        }
+
+        // Which chat this is going into, decided before a word is said so the
+        // window can show it and the user can change it.
+        let (last, fresh) = {
+            let talk = self.imp().talk.borrow();
+            let talk = talk.as_ref().expect("the window exists");
+            (talk.last.clone(), talk.fresh)
+        };
+        let minutes = self.imp().settings.borrow().voice_follow_up;
+        let going = if fresh {
+            spoken::Going::Fresh
+        } else {
+            spoken::continuation(last.as_ref(), chrono::Utc::now(), minutes)
+        };
+
+        let source = self.imp().settings.borrow().voice_source.clone();
+        // The microphone may already be open: it stays open for the whole
+        // exchange so it can be interrupted, and carrying a conversation on
+        // means picking the same stream back up rather than spawning a second
+        // `pw-record` beside the first.
+        let already_open = self
+            .imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .is_some_and(|talk| talk.recorder.is_some());
+        let started = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let talk = talk.as_mut().expect("the window exists");
+            if already_open {
+                if let Some(recorder) = talk.recorder.as_ref() {
+                    let _ = recorder.take();
+                }
+                talk.spoken = crate::model::voice::Spoken::default();
+                talk.endpointer = crate::model::voice::Endpointer::default();
+                talk.barge = crate::model::voice::Barge::default();
+                talk.pending.clear();
+                talk.live.clear();
+                talk.answer.clear();
+                talk.reading = crate::model::voice::Reading::default();
+            } else {
+                talk.clear();
+            }
+            talk.carrying_on = carrying_on;
+            talk.waiting_ms = 0;
+            talk.chat = match &going {
+                spoken::Going::On { id, title } => Some(spoken::Recent {
+                    id: id.clone(),
+                    title: title.clone(),
+                    spoke_at: chrono::Utc::now(),
+                }),
+                spoken::Going::Fresh => None,
+            };
+            if already_open {
+                None
+            } else {
+                Some(Recorder::start(
+                    &source,
+                    clone!(
+                        #[weak(rename_to = app)]
+                        self,
+                        move |block: &[f32]| app.heard_block(block)
+                    ),
+                    clone!(
+                        #[weak(rename_to = app)]
+                        self,
+                        move |reason: String| {
+                            crate::voice_log!("the microphone stopped: {reason}");
+                            app.recover_voice(&reason);
+                        }
+                    ),
+                ))
+            }
+        };
+
+        window.reset();
+        window.set_chat(match &going {
+            spoken::Going::On { title, .. } => Some(title.as_str()),
+            spoken::Going::Fresh => None,
+        });
+
+        crate::voice_log!(
+            "listening on {} (carrying on: {carrying_on}, microphone already open: {already_open})",
+            if source.is_empty() {
+                "the system default microphone"
+            } else {
+                source.as_str()
+            }
+        );
+        match started {
+            None => {
+                self.speech().reset();
+                window.set_state(State::Listening);
+                self.guard_against_a_deaf_microphone();
+            }
+            Some(Ok(recorder)) => {
+                self.speech().reset();
+                if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+                    talk.recorder = Some(recorder);
+                }
+                window.set_state(State::Listening);
+                self.guard_against_a_deaf_microphone();
+            }
+            Some(Err(error)) => {
+                self.go_idle();
+                window.set_trouble(&error.to_string());
+            }
+        }
+    }
+
+    /// Give up if no audio arrives at all.
+    ///
+    /// `Recorder` reports a pipe that closes, but a `pw-record` that stays
+    /// alive and delivers nothing — a muted device, a source that exists but
+    /// produces no frames — closes nothing and reports nothing. Every way out
+    /// of `Listening` is driven by a block of audio arriving, including the
+    /// endpointer's own patience, so with no blocks there is no way out at all
+    /// and the window listens until the user notices.
+    fn guard_against_a_deaf_microphone(&self) {
+        glib::timeout_add_local_once(
+            DEAF_MICROPHONE,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || {
+                    if app.voice_state() != State::Listening {
+                        return;
+                    }
+                    let heard_anything = app
+                        .imp()
+                        .talk
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|talk| talk.endpointer.elapsed_ms() > 0);
+                    if heard_anything {
+                        return;
+                    }
+                    crate::voice_log!(
+                        "no audio at all after {} ms — giving up",
+                        DEAF_MICROPHONE.as_millis()
+                    );
+                    app.recover_voice(
+                        "No audio arrived from the microphone. Check the input device in \
+                         Preferences.",
+                    );
+                }
+            ),
+        );
+    }
+
+    /// End the exchange: nothing running, nothing listening, microphone shut.
+    ///
+    /// The one place the microphone is closed. It is open from the first press
+    /// until here, so the panel's indicator is lit for a conversation rather
+    /// than for a whole session — and so there is always something listening
+    /// while there is something to interrupt.
+    fn go_idle(&self) {
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            if let Some(recorder) = talk.recorder.take() {
+                crate::voice_log!("closing the microphone");
+                let _ = recorder.finish();
+            }
+        }
+        if let Some(window) = self.voice_window() {
+            window.set_state(State::Idle);
+        }
+    }
+
+    /// One block of audio, forty milliseconds of it.
+    ///
+    /// The microphone is open for the whole exchange, so what a block means
+    /// depends on what is happening: while listening it is the question, and
+    /// while thinking or speaking it is only ever watched for somebody
+    /// starting to talk over the top.
+    fn heard_block(&self, block: &[f32]) {
+        let level = voice::recorder::level(block);
+        // How much audio this actually is, rather than how much was asked for.
+        // A pipe read returns what it has, which is often less than a whole
+        // block — and counting every read as a full one runs the endpointer's
+        // clock at nearly twice real time. Its patience then expires while
+        // somebody is still talking, and what they get is "I did not hear
+        // anything" said over the top of them.
+        let span_ms = (block.len() as u32 * 1_000)
+            .div_euclid(voice::recorder::SAMPLE_RATE)
+            .max(1);
+        {
+            let mut talk = self.imp().talk.borrow_mut();
+            if let Some(talk) = talk.as_mut() {
+                talk.blocks = talk.blocks.wrapping_add(1);
+                if talk.blocks % 25 == 0 {
+                    let state = talk.window.state();
+                    crate::voice_log!("block {} in {state:?}", talk.blocks);
+                }
+            }
+        }
+        match self.voice_state() {
+            State::Listening => self.heard_while_listening(block, level, span_ms),
+            // Not while transcribing. That quarter-second sits directly after
+            // somebody stopped talking, which is exactly where their own
+            // trailing breath is, and interrupting a pass that has not
+            // produced a question yet gains nothing but loses the question.
+            State::Transcribing => self.still_waiting(TRANSCRIBE_PATIENCE, span_ms),
+            State::Thinking => {
+                // Nothing is running, and nothing is going to take this out of
+                // Thinking. Every hole that has caused it — a turn dropped for
+                // want of a window, a server that was never configured, a
+                // speech worker that answered nobody — has been closed one at
+                // a time, and each of them looked identical from here: heard,
+                // and then ignored. This is the backstop, and it costs one
+                // comparison per block.
+                if self.imp().in_flight.borrow().is_none() {
+                    self.recover_voice("That question did not get through. Try it again.");
+                    return;
+                }
+                self.still_waiting(THINK_PATIENCE, span_ms);
+                if self.listen_for_interruption(level, span_ms, "thinking") {
+                    self.interrupted();
+                }
+            }
+            State::Speaking => {
+                // The same backstop as thinking: nothing but the speaker
+                // falling silent takes the window out of this state, and a
+                // missed announcement would strand it with the microphone
+                // open and no way back.
+                self.still_waiting(THINK_PATIENCE, span_ms);
+                if self.listen_for_interruption(level, span_ms, "speaking") {
+                    self.interrupted();
+                }
+            }
+            State::Idle => {}
+        }
+    }
+
+    /// A block while the question is being asked.
+    fn heard_while_listening(&self, block: &[f32], level: f64, span_ms: u32) {
+        // Whether there is a model that can say "those were words". Without
+        // one there is nothing but loudness to go on.
+        let listening_for_words = voice::speech::model_dir(voice::speech::Model::Live).is_some();
+        let (heard, chunks) = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            if talk.recorder.is_none() {
+                return;
+            }
+            talk.window.hear(level);
+            talk.pending.extend_from_slice(block);
+            let mut chunks: Vec<Vec<f32>> = Vec::new();
+            while talk.pending.len() >= voice::speech::STREAM_CHUNK {
+                chunks.push(
+                    talk.pending
+                        .drain(..voice::speech::STREAM_CHUNK)
+                        .collect::<Vec<f32>>(),
+                );
+            }
+            let before = talk.endpointer.elapsed_ms();
+            // Both are always run: the loudness one draws the meter and is the
+            // fallback, and the word one is the decision when there is a live
+            // model to make it with.
+            let by_loudness = talk.endpointer.push(level, span_ms);
+            let by_words = talk.spoken.push(span_ms);
+            let heard = if listening_for_words {
+                by_words
+            } else {
+                by_loudness
+            };
+            if talk.endpointer.elapsed_ms() / 1_000 != before / 1_000 {
+                let (speech, silence) = talk.endpointer.tally();
+                crate::voice_log!(
+                    "{} ms: peak {:.2} against gate {:.2} — {speech} ms over it, {silence} ms \
+                     under; words {}, quiet for {} ms — {heard:?}",
+                    talk.endpointer.elapsed_ms(),
+                    talk.endpointer.peak(),
+                    talk.endpointer.gate(),
+                    talk.spoken.has_words(),
+                    talk.spoken.quiet_for()
+                );
+            }
+            (heard, chunks)
+        };
+
+        // The live model, for the words on screen. Only when there is a live
+        // model: with only the accurate one installed there is no preview, and
+        // that is a missing nicety rather than a broken feature.
+        if voice::speech::model_dir(voice::speech::Model::Live).is_some() {
+            for chunk in chunks {
+                self.speech().feed(
+                    chunk,
+                    clone!(
+                        #[weak(rename_to = app)]
+                        self,
+                        move |result| {
+                            if let Ok(text) = result {
+                                app.heard_words(&text);
+                            }
+                        }
+                    ),
+                );
+            }
+        }
+
+        match heard {
+            spoken::Heard::Ended | spoken::Heard::Overlong => self.stop_listening(true),
+            spoken::Heard::NothingSaid => self.stop_listening(false),
+            spoken::Heard::Quiet | spoken::Heard::Speaking => {}
+        }
+    }
+
+    /// Watch one block for somebody talking over the top.
+    ///
+    /// The trace is what settles an argument about the threshold. Whether a
+    /// voice cleared the bar is not a thing anybody can tell by listening —
+    /// the only answer to "it did not pick me up" that is worth having is the
+    /// level, the bar, and how close it came.
+    fn listen_for_interruption(&self, level: f64, span_ms: u32, during: &str) -> bool {
+        let mut talk = self.imp().talk.borrow_mut();
+        let Some(talk) = talk.as_mut() else {
+            return false;
+        };
+        let before = talk.barge.elapsed_ms();
+        let interrupted = talk.barge.push(level, span_ms);
+        // Off the barge's own clock, not the window's: only some of these
+        // states advance the window's, so rate-limiting on it would log every
+        // block in one state and none in another.
+        if talk.barge.elapsed_ms() / 1_000 != before / 1_000 || interrupted {
+            crate::voice_log!(
+                "{during}: level {level:.2} against {:.2}, {:.0}% of the way to interrupting{}",
+                talk.barge.threshold(),
+                talk.barge.nearly() * 100.0,
+                if interrupted { " — interrupted" } else { "" }
+            );
+        }
+        interrupted
+    }
+
+    /// Count a block spent waiting, and give up if it has been far too long.
+    fn still_waiting(&self, patience_ms: u32, span_ms: u32) {
+        let over = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            talk.waiting_ms = talk.waiting_ms.saturating_add(span_ms);
+            talk.waiting_ms > patience_ms
+        };
+        if over {
+            self.recover_voice("That took too long to come back. Try it again.");
+        }
+    }
+
+    /// Put the window back somewhere a person can use it.
+    fn recover_voice(&self, trouble: &str) {
+        self.speaker().hush();
+        self.stop();
+        self.abandon();
+        self.go_idle();
+        if let Some(window) = self.voice_window() {
+            window.set_trouble(trouble);
+        }
+    }
+
+    /// Somebody started talking over it.
+    ///
+    /// Stop the answer, throw away the turn if one is still running, and take
+    /// what they are saying — from a moment before the interruption was
+    /// certain, so their first word is not the price of interrupting.
+    fn interrupted(&self) {
+        self.speaker().hush();
+        let running = self
+            .imp()
+            .in_flight
+            .borrow()
+            .as_ref()
+            .is_some_and(|turn| turn.spoken);
+        if running {
+            self.stop();
+            self.abandon();
+        }
+
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+        {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            // Everything before this was the room, or the assistant's own
+            // voice coming back off the speakers. Half a second is about the
+            // length of the trigger plus the word that caused it.
+            if let Some(recorder) = talk.recorder.as_ref() {
+                recorder.keep_last(voice::recorder::SAMPLE_RATE as usize / 2);
+            }
+            talk.spoken = crate::model::voice::Spoken::default();
+            talk.endpointer = crate::model::voice::Endpointer::default();
+            talk.barge = crate::model::voice::Barge::default();
+            talk.pending.clear();
+            talk.live.clear();
+            talk.answer.clear();
+            talk.reading = crate::model::voice::Reading::default();
+            talk.carrying_on = true;
+            talk.waiting_ms = 0;
+        }
+        window.reset();
+        window.set_state(State::Listening);
+        self.speech().reset();
+    }
+
+    /// What the live model has made of the audio so far. Feedback, not the
+    /// question: the accurate pass is what gets asked.
+    fn heard_words(&self, words: &str) {
+        let mut talk = self.imp().talk.borrow_mut();
+        let Some(talk) = talk.as_mut() else {
+            return;
+        };
+        // Only while still listening. A late chunk arriving after the utterance
+        // was transcribed would overwrite the accurate text with the rough one.
+        if talk.recorder.is_none() {
+            return;
+        }
+        // Words end an utterance, but only words the microphone can account
+        // for. The streaming model transcribes whatever it can hear — a video
+        // playing across the room, or nothing at all — and anything credited to
+        // the speaker resets the clock, so crediting the room means the
+        // microphone never closes. See `voice::Endpointer::heard_you`, which is
+        // measured against this room rather than assumed about it.
+        if !words.trim().is_empty() && !talk.spoken.words_if_heard(talk.endpointer.heard_you()) {
+            let (_, silence_ms) = talk.endpointer.tally();
+            crate::voice_log!(
+                "ignoring {:?}: too quiet to be you ({silence_ms} ms since anything was, \
+                 gate {:.2})",
+                words.trim().chars().take(24).collect::<String>(),
+                talk.endpointer.gate()
+            );
+            return;
+        }
+        // Appended exactly as it came. The model puts its own spaces at the
+        // front of the words it starts, so trimming each chunk and joining
+        // with a space of our own is what turns "testing" into "test ing"
+        // whenever a word happens to straddle two 560 ms chunks.
+        talk.live.push_str(words);
+        let live = talk.live.trim().to_string();
+        talk.window.set_heard(&live, false);
+    }
+
+    /// Close the microphone. `keep` is false when nothing was said.
+    fn stop_listening(&self, keep: bool) {
+        let taken = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            talk.recorder
+                .as_ref()
+                .map(|recorder| (recorder.take(), talk.carrying_on))
+        };
+        let Some((samples, carrying_on)) = taken else {
+            return;
+        };
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+
+        // Half a second of audio is the only thing asked of an explicit send.
+        // What the endpointer made of it is deliberately not consulted here:
+        // pressing Send is a person saying they spoke, and a gate that
+        // overrules them is a gate that loses the question. Its opinion
+        // decides when to stop listening, which is the only thing it is good
+        // at. `voice::is_a_question` catches what is left.
+        crate::voice_log!(
+            "stopped listening: keep {keep}, {} samples ({:.1}s)",
+            samples.len(),
+            samples.len() as f64 / f64::from(voice::recorder::SAMPLE_RATE)
+        );
+        let enough = samples.len() >= voice::recorder::SAMPLE_RATE as usize / 2;
+        if !keep || !enough {
+            self.go_idle();
+            if !carrying_on {
+                window.set_heard("", false);
+                window.set_trouble("I did not hear anything. Press the shortcut and speak.");
+            }
+            return;
+        }
+
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            talk.waiting_ms = 0;
+        }
+        self.flush_live_words();
+        window.set_state(State::Transcribing);
+        self.speech().transcribe(
+            samples,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |result| app.transcribed(result)
+            ),
+        );
+    }
+
+    /// Put the last part-chunk of audio through the live model.
+    ///
+    /// The streaming encoder decodes whole 560 ms chunks and emits nothing at
+    /// all until it has one, so when somebody stops talking there is up to half
+    /// a second of speech in `pending` that has never been through it — and the
+    /// last thing anybody said is exactly what is in there. Padding the
+    /// remainder out to a whole chunk and sending it is what completes the
+    /// sentence on screen.
+    ///
+    /// The words are feedback only; the accurate pass over the whole buffer is
+    /// what gets asked. But the live text is also the fallback when that pass
+    /// fails, and a transcript that visibly stops a word early reads as not
+    /// having been heard. Scribe had the same hole, where it took the end off
+    /// every dictation rather than off a preview.
+    fn flush_live_words(&self) {
+        if voice::speech::model_dir(voice::speech::Model::Live).is_none() {
+            return;
+        }
+        let remainder = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            let mut remainder = std::mem::take(&mut talk.pending);
+            if remainder.is_empty() {
+                return;
+            }
+            // The model returns nothing from a part-chunk, so silence makes up
+            // the difference rather than the words being dropped.
+            remainder.resize(voice::speech::STREAM_CHUNK, 0.0);
+            remainder
+        };
+        self.speech().feed(
+            remainder,
+            clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |result| {
+                    let Ok(text) = result else {
+                        return;
+                    };
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    let mut talk = app.imp().talk.borrow_mut();
+                    let Some(talk) = talk.as_mut() else {
+                        return;
+                    };
+                    talk.live.push_str(&text);
+                    let live = talk.live.trim().to_string();
+                    talk.window.set_heard(&live, false);
+                }
+            ),
+        );
+    }
+
+    /// The accurate pass came back.
+    fn transcribed(&self, result: Result<String, voice::speech::SpeechError>) {
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+        // Cancelled while it was running. The words are no longer wanted.
+        if window.state() != State::Transcribing {
+            return;
+        }
+        // What the live model made of it, as a fallback. The accurate pass is
+        // better and is what is used when it has anything to say — but words
+        // on screen and "I did not catch that" underneath them is the
+        // application calling the person a liar about something they just
+        // watched happen.
+        let live = self
+            .imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .map(|talk| talk.live.trim().to_string())
+            .unwrap_or_default();
+        crate::voice_log!("transcribed: {result:?} (live text: {live:?})");
+
+        let question = match result {
+            Ok(transcript) if spoken::is_a_question(&transcript) => transcript.trim().to_string(),
+            Ok(_) if spoken::is_a_question(&live) => live,
+            Err(error) if spoken::is_a_question(&live) => {
+                // Worth a line in the log rather than the window: the fallback
+                // is good enough that a person need not be told the better one
+                // failed.
+                eprintln!("familiar: the accurate pass failed, using the live text: {error}");
+                live
+            }
+            Ok(_) => {
+                self.go_idle();
+                window.set_heard("", false);
+                window.set_trouble("I did not catch that.");
+                return;
+            }
+            Err(error) => {
+                self.go_idle();
+                window.set_trouble(&voice::speech::trouble(&error));
+                return;
+            }
+        };
+
+        window.set_heard(&question, true);
+        self.ask_aloud(&question);
+    }
+
+    /// Put a spoken question to the model.
+    ///
+    /// It runs the background path — no turn widget, no composer, a chat that
+    /// is usually not the open one — because the shortcut works with the main
+    /// window closed and a turn that needs a window would either fail there or
+    /// raise one over whatever the user is doing. Everything else about it is
+    /// an ordinary turn, `scheduled` included: a person did ask, so the answer
+    /// is not announced by notification and the passive reader does read it.
+    fn ask_aloud(&self, question: &str) {
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+        if self.imp().in_flight.borrow().is_some() {
+            self.go_idle();
+            window.set_trouble("Wait for the answer that is already running to finish.");
+            return;
+        }
+        let Some((slug, project, thread)) = self.voice_chat() else {
+            self.go_idle();
+            window.set_trouble("There is nowhere to put this — no project could be opened.");
+            return;
+        };
+
+        // Remembered now rather than at settle: a turn that fails still
+        // happened in this chat, and the follow-up should carry on with it.
+        let recent = spoken::Recent {
+            id: thread.id.to_string(),
+            title: thread.display_title(),
+            spoke_at: chrono::Utc::now(),
+        };
+        // A chat with no turns in it yet is titled "New Chat", and "Carrying on
+        // “New Chat”" is a sentence about nothing. Until it has a name of its
+        // own the header says it is a new one, which is what it is.
+        let named = !thread.is_empty();
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            talk.chat = Some(recent.clone());
+            talk.last = Some(recent.clone());
+            talk.fresh = false;
+        }
+        window.set_chat(named.then_some(recent.title.as_str()));
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            talk.waiting_ms = 0;
+        }
+        window.set_state(State::Thinking);
+
+        crate::voice_log!("asking: {question:?}");
+        self.imp().in_flight.replace(Some(InFlight {
+            question: question.to_string(),
+            documents: Vec::new(),
+            images: Vec::new(),
+            stream: TurnStream::new(),
+            session: Session {
+                slug,
+                project,
+                chat: Chat::Background(Box::new(thread)),
+                view: None,
+            },
+            cancellable: gio::Cancellable::new(),
+            answer: String::new(),
+            thinking: String::new(),
+            calls: Vec::new(),
+            rounds: 0,
+            retried: false,
+            floor: false,
+            fold: None,
+            shrinks: 0,
+            exchanges: Vec::new(),
+            approved_something: false,
+            scheduled: false,
+            job: None,
+            spoken: true,
+        }));
+        self.ask(None);
+    }
+
+    /// The chat a spoken question goes into: the one being carried on, or a new
+    /// one in whichever project is open.
+    fn voice_chat(&self) -> Option<(String, Project, Thread)> {
+        let store = self.store()?;
+        let project = self.imp().project.borrow().clone();
+        let slug = project.slug.clone();
+        let carrying = self
+            .imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .and_then(|talk| talk.chat.clone());
+
+        if let Some(recent) = carrying {
+            if let Some(id) = ThreadId::from_stem(&recent.id) {
+                // The open chat's in-memory copy wins, exactly as a scheduled
+                // run's does: the file may be a turn behind what is on screen.
+                let open = self.imp().thread.borrow().id == id;
+                let thread = if open {
+                    Some(self.imp().thread.borrow().clone())
+                } else {
+                    store.load_thread(&slug, &id).ok()
+                };
+                if let Some(thread) = thread {
+                    return Some((slug, project, thread));
+                }
+            }
+        }
+        let thread = store.new_thread(&slug).ok()?;
+        crate::voice_log!("new chat {} in {slug}", thread.id);
+        Some((slug, project, thread))
+    }
+
+    /// A piece of the answer arrived.
+    fn voice_delta(&self, delta: &str) {
+        let sentences = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            talk.answer.push_str(delta);
+            let answer = talk.answer.clone();
+            talk.window.set_answer(&answer);
+            talk.reading.push(delta)
+        };
+        let speaker = self.speaker();
+        for sentence in sentences {
+            speaker.say(&sentence);
+        }
+    }
+
+    /// The turn is over. Say the tail of it and go quiet.
+    fn voice_settled(&self, answer: &str) {
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+        let (tail, skipped) = {
+            let mut talk = self.imp().talk.borrow_mut();
+            let Some(talk) = talk.as_mut() else {
+                return;
+            };
+            // The stream is the truth while it runs, but a turn can settle with
+            // an answer the deltas never carried — a recovered tool call, a
+            // failure message — so the settled text wins at the end.
+            if talk.answer.trim().is_empty() && !answer.trim().is_empty() {
+                talk.answer = answer.to_string();
+                talk.window.set_answer(answer);
+                talk.reading.push(answer);
+            }
+            (talk.reading.flush(), talk.reading.skipped_code())
+        };
+
+        let speaker = self.speaker();
+        if let Some(tail) = tail {
+            speaker.say(&tail);
+        }
+        if skipped {
+            // Said rather than read out: code aloud is noise, and silently
+            // dropping it would leave somebody waiting for an answer that
+            // already went past.
+            speaker.say("The rest is code — it is in the chat.");
+        }
+        // `is_busy`, not `is_speaking`: a sentence being fetched is an answer
+        // that is not over, and treating it as over means listening through
+        // the rest of it and taking the assistant's own voice for a question.
+        if speaker.is_busy() {
+            // Say so explicitly rather than waiting to be told. The
+            // announcement that noise has started arrives a fetch later, and
+            // until it does this is the state the exchange is actually in —
+            // which is what decides whether the microphone is watched for an
+            // interruption or read as a question.
+            window.set_state(State::Speaking);
+            crate::voice_log!("speaking the answer");
+            return;
+        }
+        window.set_state(State::Idle);
+        self.carry_on_listening();
+        // Nothing carried on, so the exchange is over and the microphone has
+        // no reason to stay open.
+        if self.voice_state() == State::Idle {
+            self.go_idle();
+        }
+    }
+
+    /// The synthesiser started or stopped.
+    fn voice_is_speaking(&self, speaking: bool) {
+        let Some(window) = self.voice_window() else {
+            return;
+        };
+        match (speaking, window.state()) {
+            (true, State::Thinking | State::Speaking) => window.set_state(State::Speaking),
+            (false, State::Speaking) => {
+                // Only when there is nothing left to say. The speaker falls
+                // quiet between two sentences, and going back to listening
+                // there would cut the answer in half — `listen` hushes it.
+                if self.speaker().is_busy() {
+                    return;
+                }
+                crate::voice_log!("finished speaking");
+                window.set_state(State::Idle);
+                self.carry_on_listening();
+                if self.voice_state() == State::Idle {
+                    self.go_idle();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Throw this exchange away: stop listening, stop thinking, stop talking.
+    fn cancel_voice(&self) {
+        self.speaker().hush();
+        let running = self
+            .imp()
+            .in_flight
+            .borrow()
+            .as_ref()
+            .is_some_and(|turn| turn.spoken);
+        if running {
+            // Cancel first, for the ordinary case where a request is in
+            // flight and the transport reports the cancellation. Then abandon,
+            // because a turn can be stranded with nothing in flight to cancel
+            // — and one left in the slot refuses every question after it with
+            // "wait for the answer that is already running". `abandon` is a
+            // no-op if `stop` has already settled the turn.
+            self.stop();
+            self.abandon();
+        }
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            talk.clear();
+        }
+        self.go_idle();
+        if let Some(window) = self.voice_window() {
+            window.reset();
+        }
+    }
+
+    /// Put the next question in a chat of its own.
+    fn fresh_voice_chat(&self) {
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            talk.fresh = true;
+            talk.chat = None;
+        }
+        if let Some(window) = self.voice_window() {
+            window.set_chat(None);
+        }
+        // Already listening: the decision was made when the microphone opened,
+        // so make it again rather than leaving the header saying one thing and
+        // the exchange doing another.
+        if self.voice_state() == State::Listening {
+            self.stop_listening(false);
+            self.start_listening();
+        }
+    }
+
+    /// Show the chat this exchange went into, in the main window.
+    fn show_voice_chat(&self) {
+        let carrying = self
+            .imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .and_then(|talk| talk.chat.clone());
+        let Some(recent) = carrying else { return };
+        let slug = self.imp().project.borrow().slug.clone();
+        self.activate();
+        self.open_thread(&slug, &recent.id);
+        if let Some(window) = self.window() {
+            window.present();
+        }
     }
 
     // -- a turn ---------------------------------------------------------------
@@ -2214,7 +3903,12 @@ impl Application {
             documents,
             images: attached,
             stream: TurnStream::new(),
-            view,
+            session: Session {
+                slug: self.imp().project.borrow().slug.clone(),
+                project: self.imp().project.borrow().clone(),
+                chat: Chat::Open,
+                view: Some(view),
+            },
             cancellable: gio::Cancellable::new(),
             answer: String::new(),
             thinking: String::new(),
@@ -2227,6 +3921,9 @@ impl Application {
             exchanges: Vec::new(),
             approved_something: false,
             scheduled,
+            // A person typing is not a run of anything.
+            job: None,
+            spoken: false,
         }));
         self.ask(None);
     }
@@ -2238,6 +3935,20 @@ impl Application {
     /// this an agentic loop rather than a single shot.
     fn ask(&self, tool_results: Option<Vec<Message>>) {
         let Some(client) = self.imp().client.borrow().clone() else {
+            // No server to ask. This used to return with the turn still in its
+            // slot, which stops the next question being sent at all — and on
+            // the spoken path there is no composer to look busy, so what it
+            // looks like is being heard and then ignored.
+            self.abandon();
+            if let Some(window) = self.voice_window() {
+                if window.state() != State::Idle {
+                    self.go_idle();
+                    window.set_trouble(
+                        "There is no model server to ask. Familiar looks for one at the address \
+                         in Preferences.",
+                    );
+                }
+            }
             return;
         };
         let question = match self.imp().in_flight.borrow().as_ref() {
@@ -2272,21 +3983,37 @@ impl Application {
     }
 
     fn on_text(&self, text: &str) {
-        let Some(window) = self.window() else {
-            return;
-        };
         let mut in_flight = self.imp().in_flight.borrow_mut();
         let Some(turn) = in_flight.as_mut() else {
             return;
         };
+        // Pushed before anything is drawn, and whether or not there is
+        // anything to draw on. The stream is the turn's own state rather than
+        // a display detail, and a background run has neither a view nor a
+        // window — this used to return early without one, which would have
+        // stalled the turn rather than run it silently.
         let events = turn.stream.push(text);
-        let view = turn.view.clone();
+        let view = turn.session.view.clone();
         let calls = turn.stream.state().tool_calls.clone();
         let settled = turn.calls.clone();
+        let spoken = turn.spoken;
         // The borrow is dropped before the widgets are touched: a handler that
         // re-enters the application would otherwise find the RefCell held.
         drop(in_flight);
 
+        // Before the view guard, not after: a spoken turn has no view, and this
+        // is the only thing watching it.
+        if spoken {
+            for event in &events {
+                if let Event::Answer(delta) = event {
+                    self.voice_delta(delta);
+                }
+            }
+        }
+
+        let Some(view) = view else {
+            return;
+        };
         for event in &events {
             view.apply(event);
         }
@@ -2297,14 +4024,17 @@ impl Application {
             self.draw_chips(&settled, &calls);
         }
         if !events.is_empty() {
-            window.conversation().follow();
+            if let Some(window) = self.window() {
+                window.conversation().follow();
+            }
         }
     }
 
     fn on_finished(&self, outcome: Result<(), ClientError>) {
-        let Some(window) = self.window() else {
-            return;
-        };
+        // No window guard. A background run finishes with nothing on screen,
+        // and returning early here would leave the turn taken out of its cell
+        // and never settled — the answer lost and the schedule marked as
+        // having run. Every use of the window below is conditional instead.
         let Some(mut turn) = self.imp().in_flight.borrow_mut().take() else {
             return;
         };
@@ -2362,7 +4092,9 @@ impl Application {
                 turn.stream.cancel();
             }
             Err(error) => {
-                turn.view.set_failure(Some(&error.to_string()));
+                if let Some(view) = &turn.session.view {
+                    view.set_failure(Some(&error.to_string()));
+                }
                 if matches!(error, ClientError::Unreachable(_)) {
                     self.report_unreachable(&error.to_string());
                 }
@@ -2393,30 +4125,60 @@ impl Application {
 
         if wants_tools {
             // The model is looping. Say so rather than going round again.
-            turn.view
-                .set_failure(Some("Stopped after too many tool calls in one turn."));
+            if let Some(view) = &turn.session.view {
+                view.set_failure(Some("Stopped after too many tool calls in one turn."));
+            }
         }
 
-        self.settle_turn(turn, state, &window);
+        self.settle_turn(turn, state, self.window().as_ref());
     }
 
     /// Run each call the model asked for, pausing at the gate when one needs
     /// approval, then hand the results back and continue the turn.
     fn run_tools(&self, calls: Vec<ToolCall>, state: TurnState) {
-        let Some(window) = self.window() else { return };
         let gated = calls
             .iter()
             .find(|call| tools::gate_for(&call.name, &call.arguments) == tools::Gate::Always)
             .cloned();
 
         let Some(gated) = gated else {
+            // Nothing to ask about, so nothing needs a window. This used to
+            // return early when the main window was closed, which stranded the
+            // turn: `in_flight` was never settled, and a spoken question that
+            // reached for the weather sat at "Thinking" until the app was
+            // quit. Every other window use in the turn path is conditional —
+            // this one was not.
             self.run_all(calls, state);
+            return;
+        };
+
+        // Somewhere to put the dialog. The main window if there is one, and
+        // the voice window if the question was spoken with the main window
+        // closed — which is the ordinary way a spoken question arrives.
+        let parent: Option<gtk::Widget> = self
+            .window()
+            .map(|window| window.upcast())
+            .or_else(|| self.voice_window().map(|window| window.upcast()));
+        let Some(parent) = parent else {
+            // No window at all: a scheduled run in the background. A gate
+            // cannot be answered by nobody, so it is refused rather than
+            // silently run, and the turn carries on with the refusal.
+            let settled = calls
+                .into_iter()
+                .map(|mut call| {
+                    if call.id == gated.id {
+                        call.outcome = Some(ToolOutcome::Denied);
+                    }
+                    call
+                })
+                .collect();
+            self.run_all(settled, state);
             return;
         };
 
         // One dialog at a time: the rest of the round waits behind it.
         approval::ask(
-            &window,
+            &parent,
             &gated.name,
             &gated.arguments,
             clone!(
@@ -2460,10 +4222,8 @@ impl Application {
         );
     }
 
-    /// End a turn that was stopped while something else was in front of it.
     fn abandon(&self) {
-        let Some(window) = self.window() else { return };
-        let Some(turn) = self.imp().in_flight.borrow_mut().take() else {
+        let Some(mut turn) = self.imp().in_flight.borrow_mut().take() else {
             return;
         };
         let state = TurnState {
@@ -2473,9 +4233,15 @@ impl Application {
             finish: Some(crate::model::turn::Finish::Cancelled),
             ..Default::default()
         };
-        turn.view.settle(&state);
-        window.composer().set_busy(false);
-        self.record(&turn.question, &state, &turn.images);
+        if let Some(view) = &turn.session.view {
+            view.settle(&state);
+        }
+        // What was said still has to be kept whether or not there is a window
+        // to unbusy — the record is the point, the composer is decoration.
+        if let Some(window) = self.window() {
+            window.composer().set_busy(false);
+        }
+        self.record(&mut turn.session, &turn.question, &state, &turn.images);
     }
 
     /// Run the calls one after another, then continue the turn.
@@ -2651,7 +4417,7 @@ impl Application {
     }
 
     /// The turn is over: draw it settled, keep it, and let the composer go.
-    fn settle_turn(&self, turn: InFlight, state: TurnState, window: &Window) {
+    fn settle_turn(&self, mut turn: InFlight, state: TurnState, window: Option<&Window>) {
         let settled = TurnState {
             thinking: turn.thinking.clone(),
             answer: turn.answer.clone(),
@@ -2667,17 +4433,36 @@ impl Application {
             && settled.tool_calls.is_empty()
             && !settled.thinking.trim().is_empty()
         {
-            turn.view.set_failure(Some(
-                "The model finished without answering — it reasoned, but its reply did not \
-                 survive the server's parsing. Asking again usually works.",
-            ));
+            if let Some(view) = &turn.session.view {
+                view.set_failure(Some(
+                    "The model finished without answering — it reasoned, but its reply did not \
+                     survive the server's parsing. Asking again usually works.",
+                ));
+            }
         }
-        turn.view.settle(&settled);
+        if let Some(view) = &turn.session.view {
+            view.settle(&settled);
+        }
+        if turn.spoken {
+            self.voice_settled(&settled.answer);
+        }
         self.draw_chips(&turn.calls, &[]);
-        window.composer().set_busy(false);
-        window.conversation().follow();
-        self.record(&turn.question, &settled, &turn.images);
-        self.fold_if_needed();
+        if let Some(window) = window {
+            window.composer().set_busy(false);
+            window.conversation().follow();
+        }
+        crate::voice_log!(
+            "settling: answer {} chars, empty {}",
+            settled.answer.len(),
+            settled.is_empty()
+        );
+        self.record(&mut turn.session, &turn.question, &settled, &turn.images);
+        // For whichever chat this turn belonged to. A scheduled chat grows a
+        // turn a day and is exactly the kind that needs folding, so skipping it
+        // would have meant the threads most in need of compaction were the only
+        // ones that never got it.
+        let (slug, id) = self.session_chat(&mut turn.session);
+        self.fold_if_needed(&slug, &id);
         // Not on a scheduled run: the "question" there is a standing prompt the
         // clock submitted, and nobody stated anything. Not on a turn that
         // produced nothing either — there is no exchange to read.
@@ -2697,12 +4482,23 @@ impl Application {
                 .chars()
                 .take(200)
                 .collect::<String>();
-            let title = self.imp().thread.borrow().display_title();
-            if let Some(heartbeat) = self.imp().thread.borrow_mut().heartbeat.as_mut() {
-                heartbeat.last_outcome = Some(summary.clone());
+            // Through the session rather than the slot: a scheduled run's
+            // outcome belongs to the chat that was scheduled, which is usually
+            // not the one on screen.
+            let (id, title) = self.with_session_thread(&mut turn.session, |thread| {
+                (thread.id.to_string(), thread.display_title())
+            });
+            // Against the job rather than the chat: the job outlives every
+            // conversation it writes into, and two jobs may share a chat, so
+            // "what happened last time" is only answerable per job.
+            if let Some(name) = &turn.job {
+                if let Some(job) = self.imp().jobs.borrow_mut().get_mut(name) {
+                    job.last_outcome = Some(summary.clone());
+                }
+                self.save_jobs();
             }
-            self.save_thread();
-            self.announce_run(&title, &summary);
+            self.save_session(&mut turn.session);
+            self.announce_run(&id, &title, &summary);
         }
     }
 
@@ -2855,12 +4651,6 @@ impl Application {
             .map(|documents| documents.join("Familiar"))
     }
 
-    /// Set, show or clear the open chat's schedule.
-    ///
-    /// The schedule lives on the thread, so this is the same write the
-    /// Scheduled Chats window makes — the assistant is not getting a private
-    /// mechanism, it is getting the one the menu already drives, which is why
-    /// anything it sets up can be paused or removed there.
     fn set_schedule(
         &self,
         action: &str,
@@ -2869,28 +4659,46 @@ impl Application {
         title: &str,
     ) -> Result<String, String> {
         use crate::model::heartbeat;
-        use crate::model::thread::Heartbeat;
+        use crate::model::jobs::{Destination, Job, Source};
+
+        let (slug, thread) = self.turn_chat();
 
         match action {
             "show" | "list" => {
-                let thread = self.imp().thread.borrow();
-                return Ok(match thread.heartbeat.as_ref() {
-                    Some(beat) => format!(
-                        "This chat runs {} and asks: {:?}{}",
-                        beat.schedule.describe().to_lowercase(),
-                        beat.prompt,
-                        if beat.enabled { "" } else { " (paused)" }
-                    ),
-                    None => "This chat has no schedule.".to_string(),
+                let jobs = self.imp().jobs.borrow();
+                let mine: Vec<String> = jobs
+                    .for_chat(&slug, &thread)
+                    .map(|job| {
+                        format!(
+                            "{} — runs {} and asks: {:?}{}",
+                            job.title(),
+                            job.schedule.describe().to_lowercase(),
+                            job.prompt,
+                            if job.enabled { "" } else { " (paused)" }
+                        )
+                    })
+                    .collect();
+                return Ok(if mine.is_empty() {
+                    "This chat has no schedule.".to_string()
+                } else {
+                    // Plural, because a chat may now carry several and saying
+                    // "this chat runs …" would be a half-truth the model would
+                    // repeat to the user.
+                    format!(
+                        "This chat runs {} scheduled job(s):\n{}",
+                        mine.len(),
+                        mine.join("\n")
+                    )
                 });
             }
             "clear" | "stop" | "remove" | "cancel" => {
-                let had = self.imp().thread.borrow_mut().heartbeat.take();
-                self.save_thread();
+                let dropped = self.imp().jobs.borrow_mut().forget_chat(&slug, &thread);
+                self.save_jobs();
                 self.refresh_threads();
-                return Ok(match had {
-                    Some(_) => "Stopped. This chat no longer runs on its own.".to_string(),
-                    None => "This chat had no schedule, so nothing changed.".to_string(),
+                return Ok(match dropped {
+                    0 => "This chat had no schedule, so nothing changed.".to_string(),
+                    1 => "Stopped. This chat no longer runs on its own.".to_string(),
+                    many => format!("Stopped all {many} of this chat's schedules."),
                 });
             }
             _ => {}
@@ -2909,26 +4717,35 @@ impl Application {
             );
         }
 
+        let mut job = Job::new(
+            "",
+            schedule,
+            prompt,
+            Destination::Chat {
+                slug: slug.clone(),
+                thread: thread.clone(),
+            },
+        );
+        // Provenance, not ownership: the user may still edit it. Worth keeping
+        // because "why is this running?" is a real question weeks later.
+        job.source = Source::Agent;
         // The clock starts now rather than at the epoch, or the first tick
         // would fire every occurrence since 1970.
-        let mut beat = Heartbeat::new(schedule, prompt);
-        beat.last_run = Some(chrono::Utc::now());
+        job.last_run = Some(chrono::Utc::now());
+        let named = crate::model::thread::tidy_title(title);
+        if let Some(named) = &named {
+            job.name = named.clone();
+        }
         let next = schedule.first_after(chrono::Local::now());
-        let named;
-        {
-            let mut thread = self.imp().thread.borrow_mut();
-            thread.heartbeat = Some(beat);
-            // A scheduled chat is the one kind you go looking for weeks later,
-            // by name, in a list — and its name would otherwise be the first
-            // line of however the conversation happened to open: "could you
-            // help me setup a morning brief with…". The model has just written
-            // the standing prompt, so it knows what this chat is for better
-            // than the first sentence does.
-            //
-            // Only when nothing has named it yet. A title the user typed under
-            // Rename Chat is theirs, and a tool call must not quietly replace
-            // it.
-            named = crate::model::thread::tidy_title(title);
+        self.imp().jobs.borrow_mut().add(job, chrono::Utc::now());
+        self.save_jobs();
+
+        // The chat is named too when nothing has named it, because a scheduled
+        // chat is the one kind you go looking for weeks later in a list, and
+        // its name would otherwise be the first line of however the
+        // conversation happened to open. Only when nothing has named it: a
+        // title the user typed under Rename Chat is theirs.
+        self.with_turn_thread(|thread| {
             let unnamed = thread
                 .title
                 .as_ref()
@@ -2936,11 +4753,10 @@ impl Application {
             if unnamed {
                 thread.title.clone_from(&named);
             }
-        }
-        // An empty chat is not written, and a schedule on an unwritten chat is
-        // a schedule that evaporates. The turn that set it up is saved with it
-        // when the turn finishes; this makes sure the thread exists either way.
-        self.save_thread();
+        });
+        // An empty chat is not written, and a schedule pointing at an unwritten
+        // chat is a schedule with nowhere to land.
+        self.save_turn_thread();
         self.refresh_threads();
         if let Some(window) = self.window() {
             window.toast(&format!(
@@ -2950,17 +4766,14 @@ impl Application {
         }
         Ok(format!(
             "Set: this chat will run {} on its own, starting {}{}. Tell the user it is set up, \
-             what it will do, and that they can pause or remove it under Scheduled Chats.",
+             what it will do, and that they can pause or remove it under Scheduled Chats. A chat \
+             may carry more than one schedule, so this did not replace any it already had.",
             schedule.describe().to_lowercase(),
             next.format("%A %-d %B at %H:%M"),
-            // Said here rather than only in the tool's description, because this
-            // is where the model finds out whether it got it right. A scheduled
-            // chat with no name of its own is listed under whatever its first
-            // sentence happened to be, weeks later, in a list of them.
             match named {
-                Some(named) => format!(", and this chat is now called {named:?}"),
-                None => ", and this chat still has no name of its own — pass `title` next time so \
-                     it is findable under Scheduled Chats"
+                Some(named) => format!(", and this job is called {named:?}"),
+                None => ", and this job has no name of its own — pass `title` next time so it is \
+                     findable under Scheduled Chats"
                     .to_string(),
             }
         ))
@@ -2998,9 +4811,11 @@ impl Application {
                     .map_err(|error| format!("that could not be saved: {error}"))?;
                 // The thread's copy remembers where it went, so the strip can
                 // stop offering to save what is already saved.
-                if let Some(open) = self.imp().thread.borrow_mut().workflow.as_mut() {
-                    open.saved_as = Some(crate::model::project::slugify(&flow.goal));
-                }
+                self.with_turn_thread(|thread| {
+                    if let Some(open) = thread.workflow.as_mut() {
+                        open.saved_as = Some(crate::model::project::slugify(&flow.goal));
+                    }
+                });
                 workflow::saved(&flow.goal)
             }
             Action::Start(name) => {
@@ -3012,7 +4827,7 @@ impl Application {
                     .map_err(|error| format!("those could not be read: {error}"))?
                     .ok_or_else(|| workflow::no_such(name))?;
                 let said = found.render();
-                self.imp().thread.borrow_mut().workflow = Some(found);
+                self.with_turn_thread(|thread| thread.workflow = Some(found));
                 said
             }
             _ => {
@@ -3020,14 +4835,14 @@ impl Application {
                 // borrow would still be live when `refresh_workflow` redraws,
                 // and a handler that re-entered the application would find the
                 // RefCell held. Every other borrow here keeps the same rule.
-                let mut open = self.imp().thread.borrow_mut().workflow.take();
+                let mut open = self.with_turn_thread(|thread| thread.workflow.take());
                 let outcome = workflow::apply(&mut open, &action);
-                self.imp().thread.borrow_mut().workflow = open;
+                self.with_turn_thread(|thread| thread.workflow = open);
                 outcome?
             }
         };
 
-        self.save_thread();
+        self.save_turn_thread();
         self.refresh_workflow();
         Ok(said)
     }
@@ -3307,7 +5122,7 @@ impl Application {
             .in_flight
             .borrow()
             .as_ref()
-            .map(|t| t.view.clone())
+            .and_then(|t| t.session.view.clone())
         else {
             return;
         };
@@ -3325,22 +5140,29 @@ impl Application {
         turn.widget().set_tool_calls(&chips);
     }
 
-    /// Keep what was said, whatever happened to the connection. A turn that
-    /// produced nothing at all is not a turn.
-    fn record(&self, question: &str, state: &TurnState, attached: &[Attachment]) {
+    fn record(
+        &self,
+        session: &mut Session,
+        question: &str,
+        state: &TurnState,
+        attached: &[Attachment],
+    ) {
         if state.is_empty() {
             return;
         }
         let mut stored = StoredTurn::new(question, state);
         stored.images = self.keep_images(attached);
-        {
-            let mut thread = self.imp().thread.borrow_mut();
+        let title = self.with_session_thread(session, |thread| {
             thread.push_turn(stored);
-        }
-        self.save_thread();
+            thread.display_title()
+        });
+        self.save_session(session);
+        self.adopt_background_turn(session);
         self.refresh_threads();
-        if let Some(window) = self.window() {
-            window.set_thread_title(&self.imp().thread.borrow().display_title());
+        // Only when the turn belongs to the chat on screen. A background run
+        // must not retitle the header over somebody else's conversation.
+        if let (Chat::Open, Some(window)) = (&session.chat, self.window()) {
+            window.set_thread_title(&title);
         }
         self.refresh_status();
     }
@@ -3356,7 +5178,16 @@ impl Application {
     fn build_request(&self, question: &str, extra: Vec<Message>) -> ChatRequest {
         let imp = self.imp();
         let settings = imp.settings.borrow();
-        let project = imp.project.borrow();
+        // The running turn's project rather than the open one. A scheduled run
+        // belongs to the project its chat is in, and that decides which tools
+        // it is offered and which instructions it runs under — reading the
+        // slot would give a background job whatever the user is looking at.
+        let project = imp
+            .in_flight
+            .borrow()
+            .as_ref()
+            .map(|turn| turn.session.project.clone())
+            .unwrap_or_else(|| imp.project.borrow().clone());
         let has_vault = imp.memory.borrow().is_some();
 
         // The file tools switched on with no folder chosen offer nothing: they
@@ -3398,10 +5229,13 @@ impl Application {
         // Whether this is the first request of the turn or a round after a
         // tool: the difference decides whether compaction may run.
         let boundary = extra.is_empty();
-        let mut history = imp
-            .thread
-            .borrow()
-            .messages_with_reasoning(settings.carry_reasoning);
+        // The running turn's chat, not the open one — the same rule as the
+        // project above, and for the same reason. A run against a chat that is
+        // not open would otherwise be sent the history of whichever chat
+        // happens to be on screen, which for a spoken question is somebody
+        // else's conversation entirely.
+        let mut history = self
+            .with_turn_thread(|thread| thread.messages_with_reasoning(settings.carry_reasoning));
 
         let (attached, documents) = imp
             .in_flight
@@ -3424,6 +5258,22 @@ impl Application {
             question.to_string()
         } else {
             format!("{}\n\n{question}", documents.join("\n\n"))
+        };
+
+        // A spoken question says so, on the question rather than in the system
+        // prompt. In the prompt it would change the cached prefix every time a
+        // chat mixed typing and talking, which is most of them; here it costs
+        // the tokens of one paragraph on the turns that are actually spoken,
+        // and the thread still records what the person said and nothing else.
+        let asked = if imp
+            .in_flight
+            .borrow()
+            .as_ref()
+            .is_some_and(|turn| turn.spoken)
+        {
+            spoken::asked_aloud(&asked)
+        } else {
+            asked
         };
 
         history.push(if attached.is_empty() {
@@ -3489,14 +5339,7 @@ impl Application {
         self.imp().thread.borrow_mut().push_note(note);
     }
 
-    /// Fold the thread if it has grown into the top of the context window.
-    ///
-    /// Between turns, never during one, and asynchronously: summarising is a
-    /// second call to the same server, and the request is built on the main
-    /// thread where waiting for one would freeze the window. So the turn that
-    /// crossed the line is sent unfolded and the *next* one benefits — which is
-    /// what the margin under [`compaction::FOLD_ABOVE`] is for.
-    fn fold_if_needed(&self) {
+    fn fold_if_needed(&self, slug: &str, id: &ThreadId) {
         let imp = self.imp();
         let (compaction_on, keep_recent, carry_reasoning) = {
             let settings = imp.settings.borrow();
@@ -3512,10 +5355,14 @@ impl Application {
         let Some(client) = imp.client.borrow().clone() else {
             return;
         };
+        // Whichever chat just finished a turn, which for a scheduled run is
+        // usually not the one on screen. Read once, here, so the summarizer is
+        // given that chat's history rather than the slot's.
+        let Some(thread) = self.thread_named(slug, id) else {
+            return;
+        };
 
-        let used = imp
-            .thread
-            .borrow()
+        let used = thread
             .turns()
             .last()
             .and_then(|turn| turn.metrics)
@@ -3530,8 +5377,8 @@ impl Application {
             return;
         }
 
-        let fold = imp.thread.borrow().fold.clone();
-        let history = imp.thread.borrow().messages_with_reasoning(carry_reasoning);
+        let fold = thread.fold.clone();
+        let history = thread.messages_with_reasoning(carry_reasoning);
         let Some((chunk, more)) = compaction::to_summarize(&history, fold.as_ref(), keep_recent)
         else {
             return;
@@ -3545,6 +5392,8 @@ impl Application {
         // by the ordinary parser — a small model will put thinking in front of
         // the summary and `TurnState::answer` is what has it stripped off.
         let stream = Rc::new(RefCell::new(TurnStream::new()));
+        let slug = slug.to_string();
+        let id = id.clone();
         client.stream(
             &request,
             clone!(
@@ -3570,10 +5419,27 @@ impl Application {
                         }
                         Err(_) => None,
                     };
-                    app.install_fold(summary, &chunk, more);
+                    // The chat is named rather than carried: a fold takes a
+                    // model call to arrive and the user may have opened
+                    // something else by then. Naming it means the summary lands
+                    // where it belongs whatever happened in between.
+                    app.install_fold(&slug, &id, summary, &chunk, more);
                 }
             ),
         );
+    }
+
+    /// One chat by name, from the slot if that is where it is and from disk
+    /// otherwise.
+    ///
+    /// The slot's copy wins when it matches, because it may be a turn ahead of
+    /// the file.
+    fn thread_named(&self, slug: &str, id: &ThreadId) -> Option<Thread> {
+        let open = self.imp().project.borrow().slug == slug && &self.imp().thread.borrow().id == id;
+        if open {
+            return Some(self.imp().thread.borrow().clone());
+        }
+        self.store()?.load_thread(slug, id).ok()
     }
 
     /// Store what the summarizer produced, and say so in the thread.
@@ -3581,11 +5447,27 @@ impl Application {
     /// A summary the server would not produce falls back to [`Headings`], which
     /// needs nothing and cannot fail. Folding is what keeps a long thread
     /// sendable, so the one outcome that must not happen is not folding at all.
-    fn install_fold(&self, summary: Option<String>, chunk: &[Message], more: usize) {
+    ///
+    /// Installed into the chat that was folded, named rather than assumed. It
+    /// used to write straight into the slot, which meant a background chat's
+    /// summary landed on whatever the user had open — a fold is a lossy
+    /// rewrite of what gets *sent*, so putting one on the wrong conversation
+    /// silently shortens it.
+    fn install_fold(
+        &self,
+        slug: &str,
+        id: &ThreadId,
+        summary: Option<String>,
+        chunk: &[Message],
+        more: usize,
+    ) {
         let imp = self.imp();
         imp.folding.set(false);
 
-        let previous = imp.thread.borrow().fold.clone();
+        let Some(mut thread) = self.thread_named(slug, id) else {
+            return;
+        };
+        let previous = thread.fold.clone();
         let fold = match summary {
             Some(summary) => compaction::Fold {
                 summary,
@@ -3593,11 +5475,20 @@ impl Application {
             },
             None => compaction::extend(previous.as_ref(), chunk, more, &Headings),
         };
+        thread.fold = Some(fold);
 
-        imp.thread.borrow_mut().fold = Some(fold);
-        self.announce(Compacted::Folded { turns: more });
-        self.save_thread();
-        self.refresh_status();
+        let open = imp.project.borrow().slug == slug && &imp.thread.borrow().id == id;
+        if open {
+            // Only the fold, not the whole thread: the slot may have gained a
+            // note or a title since this fold was asked for, and writing a copy
+            // taken before the model call would undo it.
+            imp.thread.borrow_mut().fold = thread.fold.clone();
+            self.save_thread();
+            self.announce(Compacted::Folded { turns: more });
+            self.refresh_status();
+        } else if let Some(store) = self.store() {
+            let _ = store.save_thread(slug, &thread);
+        }
     }
 
     // -- the server -----------------------------------------------------------
@@ -3702,114 +5593,130 @@ impl Application {
         let _ = settings.save(&imp.settings_path.borrow());
     }
 
-    /// Every chat in every project that wakes on its own.
-    ///
-    /// Read from disk rather than from anything in memory: only the open chat
-    /// is loaded, and a schedule set up last week on a chat in another project
-    /// is exactly the one somebody comes here to find. The open chat is taken
-    /// from memory instead, so a schedule just set is listed before it has been
-    /// written out.
     fn scheduled(&self) -> Vec<dialogs::Scheduled> {
-        let Some(store) = self.store() else {
-            return Vec::new();
-        };
         let now = chrono::Local::now();
-        let open = self.imp().thread.borrow().id.clone();
-        let open_slug = self.imp().project.borrow().slug.clone();
-
-        let mut found = Vec::new();
-        for project in self.imp().projects.borrow().iter() {
-            let Ok(threads) = store.threads(&project.slug) else {
-                continue;
-            };
-            for summary in threads {
-                let thread = if summary.id == open && project.slug == open_slug {
-                    self.imp().thread.borrow().clone()
-                } else {
-                    match store.load_thread(&project.slug, &summary.id) {
-                        Ok(thread) => thread,
-                        Err(_) => continue,
-                    }
-                };
-                let Some(heartbeat) = thread.heartbeat.clone() else {
-                    continue;
-                };
-                found.push(dialogs::Scheduled {
-                    slug: project.slug.clone(),
-                    project: project.name.clone(),
-                    thread: thread.id.to_string(),
-                    title: thread.display_title(),
-                    schedule: heartbeat.schedule.describe(),
-                    prompt: heartbeat.prompt.clone(),
-                    enabled: heartbeat.enabled,
-                    status: describe_status(&heartbeat, now),
-                    current: Some((heartbeat.schedule, heartbeat.prompt.clone())),
-                });
-            }
-        }
-        found
+        let projects = self.imp().projects.borrow().clone();
+        let store = self.store();
+        self.imp()
+            .jobs
+            .borrow()
+            .jobs
+            .iter()
+            // The system's own upkeep has its cadence in Preferences; listing
+            // it here would offer the same setting in two places.
+            .filter(|job| job.source.editable())
+            .map(|job| {
+                let slug = job.destination.slug().unwrap_or_default().to_string();
+                let project = projects
+                    .iter()
+                    .find(|project| project.slug == slug)
+                    .map(|project| project.name.clone())
+                    .unwrap_or_else(|| slug.clone());
+                // The chat's own name, so a row says where its answers land
+                // rather than only what it asks — several jobs may share one.
+                let chat = job
+                    .destination
+                    .thread()
+                    .and_then(crate::model::thread::ThreadId::from_stem)
+                    .zip(store.as_ref())
+                    .and_then(|(id, store)| store.load_thread(&slug, &id).ok())
+                    .map(|thread| thread.display_title());
+                dialogs::Scheduled {
+                    id: job.id.clone(),
+                    slug,
+                    project,
+                    chat,
+                    thread: job.destination.thread().map(str::to_string),
+                    title: job.title(),
+                    schedule: job.schedule.describe(),
+                    prompt: job.prompt.clone(),
+                    enabled: job.enabled,
+                    recovery: job.recovery,
+                    status: describe_run(job, now),
+                    current: Some((job.schedule, job.prompt.clone(), job.recovery)),
+                }
+            })
+            .collect()
     }
 
-    /// Set or change when the open thread wakes.
+    /// Set or change when the open chat wakes, from the main menu.
+    ///
+    /// Edits the chat's *first* job if it has one and adds a job otherwise.
+    /// "The schedule for this chat" is only well defined when there is one, and
+    /// a chat with several is managed under Scheduled Chats where each has a
+    /// row of its own — this entry point stays for the common case of a chat
+    /// with none.
     fn schedule_thread(&self) {
+        use crate::model::jobs::{Destination, Job};
+
         let Some(window) = self.window() else { return };
+        let (slug, thread) = self.turn_chat();
         let existing = self
             .imp()
-            .thread
+            .jobs
             .borrow()
-            .heartbeat
+            .for_chat(&slug, &thread)
+            .next()
+            .map(|job| {
+                (
+                    job.id.clone(),
+                    job.schedule,
+                    job.prompt.clone(),
+                    job.recovery,
+                )
+            });
+        let opened = existing
             .as_ref()
-            .map(|heartbeat| (heartbeat.schedule, heartbeat.prompt.clone()));
+            .map(|(_, schedule, prompt, recovery)| (*schedule, prompt.clone(), *recovery));
+        let held = existing.map(|(id, _, _, _)| id);
 
         let chat = self.imp().thread.borrow().display_title();
         dialogs::edit_schedule(
             &window,
             &chat,
-            existing,
+            opened,
             clone!(
                 #[weak(rename_to = app)]
                 self,
                 move |chosen| {
-                    let Some((schedule, prompt)) = chosen else {
+                    let Some((schedule, prompt, recovery)) = chosen else {
                         return;
                     };
-                    {
-                        let mut thread = app.imp().thread.borrow_mut();
-                        match thread.heartbeat.as_mut() {
-                            // Editing keeps `last_run`, so changing the time
-                            // does not make a run that already happened today
-                            // happen again.
-                            Some(heartbeat) => {
-                                heartbeat.schedule = schedule;
-                                heartbeat.prompt = prompt;
-                                heartbeat.enabled = true;
-                            }
-                            None => {
-                                let mut fresh =
-                                    crate::model::thread::Heartbeat::new(schedule, &prompt);
-                                // The clock starts now rather than at the
-                                // epoch: a daily set up at 09:00 waits for
-                                // tomorrow's 07:00 instead of firing at once
-                                // for a 07:00 that has already gone.
-                                fresh.last_run = Some(chrono::Utc::now());
-                                thread.heartbeat = Some(fresh);
-                            }
+                    match &held {
+                        Some(id) => app.edit_job(id, move |job| {
+                            job.schedule = schedule;
+                            job.prompt = prompt;
+                            job.recovery = recovery;
+                        }),
+                        None => {
+                            let mut job = Job::new(
+                                "",
+                                schedule,
+                                &prompt,
+                                Destination::Chat {
+                                    slug: slug.clone(),
+                                    thread: thread.clone(),
+                                },
+                            );
+                            job.recovery = recovery;
+                            // The clock starts now, or the first tick would
+                            // fire every occurrence since the epoch.
+                            job.last_run = Some(chrono::Utc::now());
+                            app.imp().jobs.borrow_mut().add(job, chrono::Utc::now());
+                            app.save_jobs();
                         }
                     }
+                    // A schedule pointing at an unwritten chat has nowhere to
+                    // land, so make sure the chat exists.
                     app.save_thread();
+                    app.refresh_threads();
+                    let next = schedule.first_after(chrono::Local::now());
                     if let Some(window) = app.window() {
-                        let next = app
-                            .imp()
-                            .thread
-                            .borrow()
-                            .heartbeat
-                            .as_ref()
-                            .and_then(|heartbeat| heartbeat.next_run(chrono::Local::now()))
-                            .map(|when| when.format("%a %-d %B at %H:%M").to_string());
-                        window.toast(&match next {
-                            Some(next) => format!("Scheduled. Next run {next}."),
-                            None => "Scheduled.".to_string(),
-                        });
+                        window.toast(&format!(
+                            "Scheduled — {}, next {}",
+                            schedule.describe().to_lowercase(),
+                            next.format("%A at %H:%M")
+                        ));
                     }
                 }
             ),
@@ -3825,27 +5732,29 @@ impl Application {
                 #[weak(rename_to = app)]
                 self,
                 move |change: dialogs::Change| match change {
-                    dialogs::Change::Enabled { slug, thread, on } => {
-                        app.edit_heartbeat(&slug, &thread, |heartbeat| heartbeat.enabled = on);
+                    dialogs::Change::Enabled { id, on } => {
+                        app.edit_job(&id, |job| job.enabled = on);
                     }
-                    dialogs::Change::Deleted { slug, thread } => {
-                        app.remove_heartbeat(&slug, &thread);
+                    dialogs::Change::Deleted { id } => {
+                        app.imp().jobs.borrow_mut().remove(&id);
+                        app.save_jobs();
+                        app.refresh_threads();
                     }
                     dialogs::Change::Opened { slug, thread } => app.open_thread(&slug, &thread),
-                    // Through the same path the switch uses, so it lands on the
-                    // chat that owns the schedule whether or not that is the
-                    // one on screen. `last_run` is deliberately left alone:
+                    // By job id, so editing one schedule leaves the others in
+                    // the same chat alone. `last_run` is deliberately untouched:
                     // moving a daily briefing from 07:00 to 08:00 must not make
                     // this morning's run happen a second time.
                     dialogs::Change::Edited {
-                        slug,
-                        thread,
+                        id,
                         schedule,
                         prompt,
+                        recovery,
                     } => {
-                        app.edit_heartbeat(&slug, &thread, move |heartbeat| {
-                            heartbeat.schedule = schedule;
-                            heartbeat.prompt = prompt;
+                        app.edit_job(&id, move |job| {
+                            job.schedule = schedule;
+                            job.prompt = prompt;
+                            job.recovery = recovery;
                         });
                         app.refresh_threads();
                     }
@@ -3854,50 +5763,27 @@ impl Application {
         );
     }
 
-    /// Change a schedule wherever its thread lives, open or not.
-    fn edit_heartbeat<F>(&self, slug: &str, thread: &str, change: F)
+    /// Change one job, wherever its chat lives and whether or not it is open.
+    ///
+    /// By id rather than by chat, which is the change the job list bought: a
+    /// chat may be the destination of several, and keying by chat would pause
+    /// or retime all of them together.
+    fn edit_job<F>(&self, id: &str, change: F)
     where
-        F: FnOnce(&mut crate::model::thread::Heartbeat),
+        F: FnOnce(&mut crate::model::jobs::Job),
     {
-        let (Some(store), Some(id)) = (self.store(), ThreadId::from_stem(thread)) else {
-            return;
-        };
-        // The open thread is edited in memory and saved, or a later write of
-        // the open thread would overwrite what was just changed on disk.
-        let is_open =
-            self.imp().thread.borrow().id == id && self.imp().project.borrow().slug == slug;
-        if is_open {
-            if let Some(heartbeat) = self.imp().thread.borrow_mut().heartbeat.as_mut() {
-                change(heartbeat);
+        let found = {
+            let mut jobs = self.imp().jobs.borrow_mut();
+            match jobs.get_mut(id) {
+                Some(job) => {
+                    change(job);
+                    true
+                }
+                None => false,
             }
-            self.save_thread();
-            return;
-        }
-        let Ok(mut loaded) = store.load_thread(slug, &id) else {
-            return;
         };
-        if let Some(heartbeat) = loaded.heartbeat.as_mut() {
-            change(heartbeat);
-        }
-        let _ = store.save_thread(slug, &loaded);
-    }
-
-    /// Stop a thread waking. The thread and everything it said stay.
-    fn remove_heartbeat(&self, slug: &str, thread: &str) {
-        let (Some(store), Some(id)) = (self.store(), ThreadId::from_stem(thread)) else {
-            return;
-        };
-        let is_open =
-            self.imp().thread.borrow().id == id && self.imp().project.borrow().slug == slug;
-        if is_open {
-            self.imp().thread.borrow_mut().heartbeat = None;
-            self.save_thread();
-        } else if let Ok(mut loaded) = store.load_thread(slug, &id) {
-            loaded.heartbeat = None;
-            let _ = store.save_thread(slug, &loaded);
-        }
-        if let Some(window) = self.window() {
-            window.toast("Schedule removed. The chat is still here.");
+        if found {
+            self.save_jobs();
         }
     }
 
@@ -3921,6 +5807,10 @@ impl Application {
                     // closing the dialog must not be able to lose a setting.
                     let _ = edited.settings.save(&imp.settings_path.borrow());
                     let _ = edited.config.save(&Config::default_path());
+                    // Takes effect now rather than at the next launch: somebody
+                    // switching this on has just decided they want tonight's
+                    // schedule to run.
+                    app.apply_background();
                     app.refresh_status();
                 }
             ),
@@ -3997,8 +5887,8 @@ fn show_shortcuts(window: &Window) {
 /// from the reader: paused is a decision they made, never-run is a schedule
 /// waiting for its first occurrence, and a last run is the only evidence the
 /// thing works at all.
-fn describe_status(
-    heartbeat: &crate::model::thread::Heartbeat,
+fn describe_run(
+    heartbeat: &crate::model::jobs::Job,
     now: chrono::DateTime<chrono::Local>,
 ) -> String {
     if !heartbeat.enabled {

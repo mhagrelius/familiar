@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local, Utc};
 
-use super::heartbeat::Schedule;
+use super::heartbeat::{Recovery, Schedule};
 use serde::{Deserialize, Serialize};
 
 use super::turn::{Finish, ToolCall, ToolOutcome, TurnMetrics, TurnState};
@@ -231,6 +231,13 @@ pub struct Heartbeat {
     /// lose the prompt they spent time on.
     #[serde(default = "crate::model::thread::yes")]
     pub enabled: bool,
+    /// How stale a missed occurrence may be and still be worth running.
+    ///
+    /// Defaults to [`Recovery::OnTime`], which is what every schedule did
+    /// before the choice existed, so a thread written by an older build reads
+    /// back behaving exactly as it did.
+    #[serde(default)]
+    pub recovery: Recovery,
     /// When it last ran, which is what `Schedule::due` measures from. `None`
     /// until it has, and the first run is scheduled from when it was set up
     /// rather than from the epoch.
@@ -251,22 +258,29 @@ impl Heartbeat {
             schedule,
             prompt: prompt.trim().to_string(),
             enabled: true,
+            recovery: Recovery::default(),
             last_run: None,
             last_outcome: None,
         }
     }
 
-    /// Whether to run now.
+    /// Whether to run now, why, and which occurrence it is for.
     ///
     /// A thread that has never run gets its clock started here rather than
     /// firing immediately: `Schedule::due` answers `None` for a `None` last
     /// run, and the application records `last_run` when it sets one up.
-    pub fn due(&self, now: DateTime<Local>) -> Option<crate::model::heartbeat::Due> {
+    pub fn due(
+        &self,
+        now: DateTime<Local>,
+    ) -> Option<(crate::model::heartbeat::Due, DateTime<Local>)> {
         if !self.enabled {
             return None;
         }
-        self.schedule
-            .due(self.last_run.map(|last| last.with_timezone(&Local)), now)
+        self.schedule.due(
+            self.last_run.map(|last| last.with_timezone(&Local)),
+            now,
+            self.recovery,
+        )
     }
 
     /// The next time this is expected to run, for the window that lists them.

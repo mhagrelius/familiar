@@ -23,6 +23,7 @@ use familiar::model::turn::TurnMetrics;
 use familiar::model::turn::{Event, Finish, TurnState};
 use familiar::ui::file_tree::FileRow;
 use familiar::ui::sidebar::Row;
+use familiar::ui::voice::{State, VoiceWindow};
 use familiar::ui::{Chip, Composer, Sidebar, ToolChip, TurnView, Window};
 
 /// Cases run in order; each gets a fresh window.
@@ -697,9 +698,11 @@ const CASES: &[Case] = &[
         assert_eq!(cell.text(), "EuroNews");
     }),
     ("a hidden table leaves no gap where its source was", |_| {
-        // The source stays in the buffer, invisible. GTK gives a line that is
-        // invisible end to end no height at all — if that ever stopped being
-        // true, every table would sit under a stack of blank lines.
+        // The source stays in the buffer, invisible — but hiding a line's
+        // characters does not hide the *line*: the newline that ends the block
+        // is still there, still asks for a line of prose worth of height, and
+        // put a band under every table until it was scaled down with the rest
+        // of the source. The slack below is one shrunk gap, not one line.
         let mut rows = String::from("| a | b |\n|---|---|\n");
         for number in 0..6 {
             rows.push_str(&format!("| {number} | {number} |\n"));
@@ -712,9 +715,8 @@ const CASES: &[Case] = &[
         let (_, table_height, _, _) = grid.measure(gtk::Orientation::Vertical, -1);
         let (_, answer_height, _, _) = answer.measure(gtk::Orientation::Vertical, 600);
 
-        // One line's slack: the anchor sits on a line of its own.
         assert!(
-            answer_height < table_height + 40,
+            answer_height < table_height + 8,
             "the table is {table_height}px but the answer is {answer_height}px"
         );
     }),
@@ -1355,13 +1357,16 @@ const CASES: &[Case] = &[
     ("a project's page says what runs on its own", |window| {
         let planning = Project::named("Planning");
         let scheduled = [familiar::ui::dialogs::Scheduled {
+            id: "job-1".into(),
             slug: "planning".into(),
             project: "Planning".into(),
-            thread: "thread-1".into(),
+            chat: Some("Morning briefing".into()),
+            thread: Some("thread-1".into()),
             title: "Morning briefing".into(),
             schedule: "Weekdays at 07:00".into(),
             prompt: "what is due?".into(),
             enabled: true,
+            recovery: familiar::model::heartbeat::Recovery::OnTime,
             status: "Last ran 2 hours ago".into(),
             current: None,
         }];
@@ -1387,19 +1392,23 @@ const CASES: &[Case] = &[
             // at all.
             let heard = Rc::new(RefCell::new(Vec::<String>::new()));
             let scheduled = [familiar::ui::dialogs::Scheduled {
+                id: "job-1".into(),
                 slug: "default".into(),
                 project: "Chats".into(),
-                thread: "t1".into(),
+                chat: Some("Morning Briefing".into()),
+                thread: Some("t1".into()),
                 title: "Morning Briefing".into(),
                 schedule: "Daily at 08:00".into(),
                 prompt: "AI news and the weather.".into(),
                 enabled: true,
+                recovery: familiar::model::heartbeat::Recovery::SameDay,
                 status: "Last ran just now".into(),
                 current: Some((
                     familiar::model::heartbeat::Schedule::Daily {
                         at: chrono::NaiveTime::from_hms_opt(8, 0, 0).expect("08:00"),
                     },
                     "AI news and the weather.".into(),
+                    familiar::model::heartbeat::Recovery::SameDay,
                 )),
             }];
             familiar::ui::dialogs::present_schedules(window, &scheduled, {
@@ -1664,6 +1673,96 @@ const CASES: &[Case] = &[
             assert_eq!(account.port, 993);
         },
     ),
+    (
+        "the voice window's one button is named after the state it is in",
+        |_| {
+            // One gesture and one button, so what it says is the only thing
+            // telling somebody what pressing it will do. A button that still
+            // says Talk while it is listening is the whole feature misread.
+            let voice = VoiceWindow::new();
+            for (state, label) in [
+                (State::Idle, "Talk"),
+                (State::Listening, "Send"),
+                (State::Transcribing, "Stop"),
+                (State::Thinking, "Stop"),
+                (State::Speaking, "Stop"),
+            ] {
+                voice.set_state(state);
+                assert_eq!(voice.state(), state);
+                button_labelled(&voice, label);
+            }
+            voice.destroy();
+        },
+    ),
+    ("the level meter is up only while the microphone is", |_| {
+        // A meter that sits there flat while nothing is being recorded
+        // reads as a microphone that stopped working.
+        let voice = VoiceWindow::new();
+        let meter = || find_named::<gtk::DrawingArea>(voice.clone().upcast()).expect("the meter");
+        // get_visible, not is_visible: the latter is ancestor-aware and
+        // these windows are never presented.
+        voice.set_state(State::Listening);
+        assert!(meter().get_visible());
+        voice.hear(0.4);
+        voice.set_state(State::Thinking);
+        assert!(!meter().get_visible());
+        voice.destroy();
+    }),
+    (
+        "words still being said look different from words that are settled",
+        |_| {
+            // The live model's text is a preview and is often wrong at the
+            // edges. It has to be visibly provisional or somebody will read it
+            // as what was sent.
+            let voice = VoiceWindow::new();
+            voice.set_heard("what did I say about the dep", false);
+            let heard = label_with(&voice, "what did I say about the dep");
+            assert!(heard.has_css_class("dimmed"));
+            voice.set_heard("what did I say about the deploy", true);
+            let heard = label_with(&voice, "what did I say about the deploy");
+            assert!(!heard.has_css_class("dimmed"));
+            voice.destroy();
+        },
+    ),
+    (
+        "the voice window says which chat the answer went into",
+        |_| {
+            let voice = VoiceWindow::new();
+            voice.set_chat(Some("The deploy"));
+            assert!(
+                labels(voice.clone().upcast())
+                    .iter()
+                    .any(|label| label.contains("The deploy")),
+                "the chat being carried on has to be named"
+            );
+            voice.set_chat(None);
+            assert!(labels(voice.clone().upcast())
+                .iter()
+                .any(|label| label.contains("A new chat")));
+            voice.destroy();
+        },
+    ),
+    ("trouble is not shown as though it were an answer", |_| {
+        let voice = VoiceWindow::new();
+        voice.set_trouble("I did not hear anything.");
+        let trouble = label_with(&voice, "I did not hear anything.");
+        assert!(trouble.has_css_class("warning"));
+        // And a new exchange starts clean rather than under the warning.
+        voice.reset();
+        assert!(!trouble.has_css_class("warning"));
+        voice.destroy();
+    }),
+    ("a shortcut is only one GTK can parse", |_| {
+        use familiar::ui::voice::shortcut;
+        assert!(shortcut::is_parsable(shortcut::DEFAULT_ACCELERATOR));
+        assert!(shortcut::is_parsable("<Control><Alt>d"));
+        assert!(!shortcut::is_parsable(""));
+        assert!(!shortcut::is_parsable("not a shortcut"));
+        // What the preferences row shows is the readable spelling, not the
+        // one GNOME stores.
+        let label = shortcut::human_label(shortcut::DEFAULT_ACCELERATOR);
+        assert!(!label.contains('<'), "got {label}");
+    }),
 ];
 
 // -- helpers -----------------------------------------------------------------
@@ -1816,6 +1915,37 @@ fn button_labelled(root: &impl IsA<gtk::Widget>, label: &str) -> gtk::Button {
         }
     });
     found.unwrap_or_else(|| panic!("no {label:?} button"))
+}
+
+/// The first label anywhere under `root` whose text is `text`.
+fn label_with(root: &impl IsA<gtk::Widget>, text: &str) -> gtk::Label {
+    let mut found = None;
+    walk(root.as_ref(), &mut |widget| {
+        if found.is_some() {
+            return;
+        }
+        if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+            if label.text() == text {
+                found = Some(label);
+            }
+        }
+    });
+    found.unwrap_or_else(|| panic!("no label reading {text:?}"))
+}
+
+/// Like [`find`], but skipping widgets a window builds for itself — the header
+/// bar's own drawing areas would otherwise come first.
+fn find_named<T: IsA<gtk::Widget>>(root: gtk::Widget) -> Option<T> {
+    let mut found = None;
+    walk(&root, &mut |widget| {
+        if found.is_some() {
+            return;
+        }
+        if widget.has_css_class("voice-meter") {
+            found = widget.clone().downcast::<T>().ok();
+        }
+    });
+    found
 }
 
 fn banner(window: &Window) -> adw::Banner {

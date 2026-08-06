@@ -358,11 +358,6 @@ impl Sidebar {
             move |_, position| widget.activated(position)
         ));
 
-        let menu = gtk::PopoverMenu::from_model(None::<&gio::Menu>);
-        menu.set_has_arrow(false);
-        menu.set_halign(gtk::Align::Start);
-        menu.set_parent(self);
-
         let actions = gio::SimpleActionGroup::new();
         for name in [
             "new-chat",
@@ -404,7 +399,7 @@ impl Sidebar {
         imp.tree.replace(Some(tree));
         imp.selection.replace(Some(selection));
         imp.list.replace(Some(list));
-        imp.menu.replace(Some(menu));
+        // No popover is built here: one is built per menu, in `show_menu`.
         imp.actions.replace(Some(actions));
     }
 
@@ -571,11 +566,24 @@ impl Sidebar {
     // -- menus -----------------------------------------------------------------
 
     fn show_menu(&self, row: &Row, at: &gtk::Widget, x: f64, y: f64) {
-        let Some(menu) = self.imp().menu.borrow().clone() else {
-            return;
-        };
         let Some(model) = row.menu() else { return };
-        menu.set_menu_model(Some(&model));
+        // A popover built for *this* menu, rather than one popover whose model
+        // is swapped. `GtkPopoverMenu::set_menu_model` rebuilds the popover's
+        // contents, and popping it up in the same frame shows one that has not
+        // been built yet — so nothing appears. Right-click the same row again
+        // and the model is unchanged, nothing is rebuilt, and it works: which
+        // is exactly the "I have to click twice on a different row" this was.
+        //
+        // The previous one is taken down and unparented first. A popover left
+        // parented is a warning at dispose and a leak before it.
+        if let Some(previous) = self.imp().menu.borrow_mut().take() {
+            previous.popdown();
+            previous.unparent();
+        }
+        let menu = gtk::PopoverMenu::from_model(Some(&model));
+        menu.set_has_arrow(false);
+        menu.set_halign(gtk::Align::Start);
+        menu.set_parent(self);
 
         // The pointer is in the row's coordinates and the popover is parented
         // to the sidebar, so the point has to be translated or every menu opens
@@ -590,6 +598,7 @@ impl Sidebar {
             1,
         )));
         menu.popup();
+        self.imp().menu.replace(Some(menu));
     }
 
     /// Carry out one menu item on the row its target names.

@@ -16,7 +16,7 @@
 //! foreground and the accent colour, which keeps them right under any theme
 //! including a high-contrast one — the same reasoning as Brain's.
 
-use brain::model::markdown::{parse, Parsed, Style};
+use brain::model::markdown::{parse, LineState, Parsed, Style};
 use gtk::gdk::RGBA;
 use gtk::glib;
 use gtk::prelude::*;
@@ -79,15 +79,23 @@ pub fn install(view: &gtk::TextView) {
     // Syntax. Hidden, always: nobody is editing a reply.
     tag(MARKER).set_invisible(true);
 
-    for (name, scale) in [("md-h1", 1.6), ("md-h2", 1.35), ("md-h3", 1.15)] {
+    // A heading in an answer is a signpost between two paragraphs, not a title
+    // page: weight carries it, and size only has to separate the three levels.
+    for (name, scale) in [("md-h1", 1.35), ("md-h2", 1.2), ("md-h3", 1.08)] {
         let heading = tag(name);
         heading.set_scale(scale);
         heading.set_weight(700);
-        // Blank lines in the source already separate blocks; this is only the
-        // extra breath a heading wants above it.
+        // The blank line above a heading is shrunk with every other one; this
+        // is the extra breath that keeps it with the text it introduces
+        // rather than floating between two blocks.
         heading.set_pixels_above_lines(6);
-        heading.set_pixels_below_lines(2);
+        heading.set_pixels_below_lines(1);
     }
+
+    // The blank line a paragraph break is made of, at a fraction of its height.
+    // Left in rather than hidden: the gap between two paragraphs is what says
+    // they are two, and a scale is a gap that follows the reader's font size.
+    tag("md-blank").set_scale(0.45);
 
     tag("md-bold").set_weight(700);
     tag("md-italic").set_style(gtk::pango::Style::Italic);
@@ -144,14 +152,96 @@ pub fn recolour(view: &gtk::TextView) {
     }
 }
 
-/// Replace the view's contents with `text`, rendered.
 pub fn render(view: &gtk::TextView, text: &str) {
     let buffer = view.buffer();
     let parsed = parse(text);
     buffer.set_text(text);
     apply(&buffer, &parsed);
+    shrink_gaps(&buffer, text, &parsed);
     aim(&buffer, text, &parsed);
     lay_out_tables(view, text, &parsed);
+}
+
+/// Take the space between blocks down to a gap, per [`gaps`].
+fn shrink_gaps(buffer: &gtk::TextBuffer, text: &str, parsed: &Parsed) {
+    let tags = buffer.tag_table();
+    let (Some(blank), Some(marker)) = (tags.lookup("md-blank"), tags.lookup(MARKER)) else {
+        return;
+    };
+
+    for (start, end, gap) in gaps(text, parsed) {
+        let (Ok(start), Ok(end)) = (i32::try_from(start), i32::try_from(end)) else {
+            continue;
+        };
+        let tag = match gap {
+            Gap::Shrunk => &blank,
+            Gap::Closed => &marker,
+        };
+        buffer.apply_tag(
+            tag,
+            &buffer.iter_at_offset(start),
+            &buffer.iter_at_offset(end),
+        );
+    }
+}
+
+/// What becomes of a line that has nothing on it to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// A blank line: kept, at a fraction of a line's height.
+    Shrunk,
+    /// A line that is nothing but syntax: taken away, newline and all, so it
+    /// closes up into the line below rather than leaving a band where the
+    /// hidden characters used to be.
+    Closed,
+}
+
+/// The character ranges an answer's vertical space can come out of.
+///
+/// The buffer holds the answer as the model wrote it, so a paragraph break is
+/// a real empty line costing a real line of prose — over an answer with six
+/// headings, a table and two code blocks in it, that is most of the scrolling.
+/// The gap between two paragraphs is still what says they are two, so a blank
+/// line is shrunk rather than removed; a fence, which says nothing once its
+/// characters are hidden, goes altogether.
+///
+/// A blank line inside a fence is content and is left at full height.
+fn gaps(text: &str, parsed: &Parsed) -> Vec<(usize, usize, Gap)> {
+    let syntax = |at: usize| {
+        parsed
+            .markers
+            .iter()
+            .any(|marker| at >= marker.start && at < marker.end)
+    };
+
+    let mut found = Vec::new();
+    let mut offset = 0usize;
+    for (index, line) in text.split('\n').enumerate() {
+        let start = offset;
+        // Past the newline this line ends with: that character is what a blank
+        // line is made of, and its font is what the line's height comes from.
+        offset += line.chars().count() + 1;
+        let fenced = parsed.line_states.get(index) == Some(&LineState::Fence);
+
+        if line.trim().is_empty() {
+            if !fenced {
+                found.push((start, offset, Gap::Shrunk));
+            }
+            continue;
+        }
+
+        // Every character that would show is a marker, so nothing on this line
+        // will be drawn.
+        let shown = line
+            .chars()
+            .enumerate()
+            .filter(|(_, character)| !character.is_whitespace())
+            .any(|(at, _)| !syntax(start + at));
+        if !shown {
+            found.push((offset - 1, offset, Gap::Closed));
+        }
+    }
+    found
 }
 
 /// Tag every link with where it goes.
@@ -550,20 +640,10 @@ fn alignment_of(delimiter: &str) -> Vec<Align> {
         .collect()
 }
 
-/// Put a real grid where each table's source is.
-///
-/// A `GtkTextView` has no columns, so the pipes are hidden the way any other
-/// syntax is and a `GtkGrid` is anchored at the head of the block. The source
-/// stays in the buffer: every offset the scanner reported still lines up, and
-/// the answer can still be read back as the model wrote it.
-///
-/// The anchor goes *before* the source rather than after it. GTK reserves the
-/// child's height either way, but it does not draw a child that trails an
-/// otherwise-invisible line — which is a table-shaped blank band and nothing
-/// else. As the first character on the line, it draws.
 fn lay_out_tables(view: &gtk::TextView, text: &str, parsed: &Parsed) {
     let buffer = view.buffer();
-    let Some(marker) = buffer.tag_table().lookup(MARKER) else {
+    let tags = buffer.tag_table();
+    let (Some(marker), Some(blank)) = (tags.lookup(MARKER), tags.lookup("md-blank")) else {
         return;
     };
 
@@ -580,6 +660,16 @@ fn lay_out_tables(view: &gtk::TextView, text: &str, parsed: &Parsed) {
             &marker,
             &buffer.iter_at_offset(start + 1),
             &buffer.iter_at_offset(end + 1),
+        );
+        // Hiding the source does not take its *lines* away: the newline that
+        // ends the block is still visible, because it is what ends the line the
+        // grid is on, and it still asks for a line of prose worth of height
+        // under the table. Scaling that run down closes the band up without
+        // touching the grid, which is a widget and takes no notice of a font.
+        buffer.apply_tag(
+            &blank,
+            &buffer.iter_at_offset(start),
+            &buffer.iter_at_offset(end + 2),
         );
         view.add_child_at_anchor(&grid(&table), &anchor);
     }
@@ -1116,6 +1206,45 @@ mod tests {
         // Three empty cells, not one and not none: the outer pipes are not
         // columns but the ones between them are.
         assert_eq!(table.rows[2], ["", "", ""]);
+    }
+
+    /// What an answer's vertical space is made of, decided over the source
+    /// rather than in the buffer — so the case that matters most, a fence and
+    /// the blank lines around it, can be checked without a display.
+    #[test]
+    fn a_blank_line_is_a_gap_and_a_fence_is_nothing() {
+        let text = "One.\n\n```sh\nrun it\n\nagain\n```\n\nTwo.";
+        let found = gaps(text, &parse(text));
+        let of = |gap: Gap| -> Vec<(usize, usize)> {
+            found
+                .iter()
+                .filter(|(_, _, kind)| *kind == gap)
+                .map(|&(start, end, _)| (start, end))
+                .collect()
+        };
+
+        // The two blank lines between blocks, and not the one inside the fence:
+        // an empty line in a shell script is a line of the script.
+        let characters: Vec<char> = text.chars().collect();
+        assert_eq!(of(Gap::Shrunk), [(5, 6), (30, 31)]);
+        for (start, end) in of(Gap::Shrunk) {
+            let taken: String = characters[start..end].iter().collect();
+            assert_eq!(taken, "\n", "{start}..{end} is not a blank line");
+        }
+
+        // Both fence lines close up, newline and all.
+        assert_eq!(of(Gap::Closed).len(), 2);
+        for (start, end) in of(Gap::Closed) {
+            assert_eq!(characters[start..end], ['\n']);
+        }
+    }
+
+    /// Prose is left alone. A line that reads as blank because everything on it
+    /// is *styled* still has words on it.
+    #[test]
+    fn a_line_with_words_on_it_keeps_its_height() {
+        let text = "**All bold.**\n# A heading\n- an item";
+        assert_eq!(gaps(text, &parse(text)), []);
     }
 
     #[test]

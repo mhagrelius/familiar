@@ -16,6 +16,12 @@ export GTK_A11Y=none
 export GSETTINGS_BACKEND=memory
 export RUST_BACKTRACE=1
 
+# And this one. Background running holds the application open with no window,
+# which is exactly what a scheduled assistant wants and exactly what makes an
+# integration test that drives the real application never terminate. A test
+# must not be trapped by a setting the user happens to have switched on.
+export FAMILIAR_NO_BACKGROUND=1
+
 # And so does this. Memory's usage ledger and the dream's journal default to
 # $XDG_DATA_HOME/familiar/, which without an override is the real one — a test
 # that opened a vault would write counts into the notes you use every day. The

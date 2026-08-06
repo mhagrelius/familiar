@@ -39,7 +39,7 @@ mod imp {
             Self {
                 stack: gtk::Stack::new(),
                 scroller: gtk::ScrolledWindow::new(),
-                turns: gtk::Box::new(gtk::Orientation::Vertical, 24),
+                turns: gtk::Box::new(gtk::Orientation::Vertical, 18),
                 empty: adw::StatusPage::new(),
                 following: Cell::new(true),
             }

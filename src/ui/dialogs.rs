@@ -537,32 +537,47 @@ where
 
 /// One scheduled chat, as the management window shows it.
 pub struct Scheduled {
+    /// The job, not the chat. Several jobs may land in one chat, so a row keyed
+    /// by chat could not tell two of them apart — pausing one would pause both.
+    pub id: String,
     pub slug: String,
     pub project: String,
-    pub thread: String,
+    /// The chat its answers land in, when it lands in one. Shown because a chat
+    /// may now carry several jobs and "which conversation is this?" stops being
+    /// answerable from the title alone.
+    pub chat: Option<String>,
+    /// The chat's id, for the Open button. `None` for a job that makes a fresh
+    /// chat each run — there is nothing to open until it has run once.
+    pub thread: Option<String>,
     pub title: String,
     pub schedule: String,
     pub prompt: String,
     pub enabled: bool,
+    pub recovery: crate::model::heartbeat::Recovery,
     /// "Ran 20 minutes ago", or why it has not.
     pub status: String,
-    /// The cadence and standing prompt as values rather than as the sentences
-    /// above them, so the editor can open pre-filled with what is actually set.
-    /// `schedule` and `prompt` are what this row *reads* as; this is what it
-    /// *is*.
-    pub current: Option<(crate::model::heartbeat::Schedule, String)>,
+    /// The cadence, standing prompt and recovery as values rather than as the
+    /// sentences above them, so the editor can open pre-filled with what is
+    /// actually set. `schedule` and `prompt` are what this row *reads* as; this
+    /// is what it *is*.
+    pub current: Option<(
+        crate::model::heartbeat::Schedule,
+        String,
+        crate::model::heartbeat::Recovery,
+    )>,
 }
 
 /// What the window asks the application to do.
+/// Keyed by job id throughout. A chat may be the destination of several jobs,
+/// so `(slug, thread)` no longer identifies one — pausing by chat would pause
+/// every schedule that lands there.
 pub enum Change {
     Enabled {
-        slug: String,
-        thread: String,
+        id: String,
         on: bool,
     },
     Deleted {
-        slug: String,
-        thread: String,
+        id: String,
     },
     Opened {
         slug: String,
@@ -576,10 +591,10 @@ pub enum Change {
     /// happened to be open. Setting one from the wrong chat did not fail or
     /// warn; it made a second schedule somewhere else.
     Edited {
-        slug: String,
-        thread: String,
+        id: String,
         schedule: crate::model::heartbeat::Schedule,
         prompt: String,
+        recovery: crate::model::heartbeat::Recovery,
     },
 }
 
@@ -626,9 +641,14 @@ where
         // The cadence has moved out of the description and into a row of its
         // own, because it is now something you can click to change rather than
         // a label. What is left up here is which project the chat belongs to.
+        // The chat is named beside the project now that several jobs may share
+        // one: "Work" alone no longer says where a run's answer will appear.
         let group = adw::PreferencesGroup::builder()
             .title(&entry.title)
-            .description(&entry.project)
+            .description(&match &entry.chat {
+                Some(chat) => format!("{} · {chat}", entry.project),
+                None => format!("{} · a new chat each run", entry.project),
+            })
             .build();
 
         let running = adw::SwitchRow::builder()
@@ -638,12 +658,10 @@ where
             .build();
         running.connect_active_notify({
             let on_change = on_change.clone();
-            let slug = entry.slug.clone();
-            let thread = entry.thread.clone();
+            let id = entry.id.clone();
             move |row| {
                 on_change(Change::Enabled {
-                    slug: slug.clone(),
-                    thread: thread.clone(),
+                    id: id.clone(),
                     on: row.is_active(),
                 });
             }
@@ -674,6 +692,19 @@ where
         prompt.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         group.add(&prompt);
 
+        // What happens when the machine was off at the appointed hour. Shown
+        // rather than hidden in the editor for the same reason the other two
+        // are: it is a thing about this schedule somebody will want to check,
+        // and a briefing that silently did not run is exactly what sends them
+        // looking.
+        let missed = adw::ActionRow::builder()
+            .title("If missed")
+            .subtitle(entry.recovery.describe())
+            .activatable(true)
+            .build();
+        missed.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        group.add(&missed);
+
         // Both rows open the same editor, pre-filled from this schedule, and
         // write back through `Change::Edited` — which goes to `edit_heartbeat`,
         // so it reaches the chat whether or not it is the one on screen. That
@@ -681,21 +712,21 @@ where
         // change the thing you are already looking at.
         let edit = {
             let on_change = on_change.clone();
-            let slug = entry.slug.clone();
-            let thread = entry.thread.clone();
+            let id = entry.id.clone();
             let title = entry.title.clone();
             let existing = entry.current.clone();
             let dialog = dialog.clone();
             let when = when.clone();
             let prompt = prompt.clone();
+            let missed = missed.clone();
             move || {
                 let on_change = on_change.clone();
-                let slug = slug.clone();
-                let thread = thread.clone();
+                let id = id.clone();
                 let when = when.clone();
                 let prompt = prompt.clone();
+                let missed = missed.clone();
                 edit_schedule(&dialog, &title, existing.clone(), move |chosen| {
-                    let Some((schedule, asked)) = chosen else {
+                    let Some((schedule, asked, recovery)) = chosen else {
                         return;
                     };
                     // Written straight back into the rows, so the list a person
@@ -703,11 +734,12 @@ where
                     // what it used to say.
                     when.set_subtitle(&schedule.describe());
                     prompt.set_subtitle(&asked);
+                    missed.set_subtitle(recovery.describe());
                     on_change(Change::Edited {
-                        slug: slug.clone(),
-                        thread: thread.clone(),
+                        id: id.clone(),
                         schedule,
                         prompt: asked,
+                        recovery,
                     });
                 });
             }
@@ -720,37 +752,44 @@ where
 
         let open = gtk::Button::with_label("Open");
         open.set_valign(gtk::Align::Center);
-        open.connect_clicked({
-            let on_change = on_change.clone();
-            let slug = entry.slug.clone();
-            let thread = entry.thread.clone();
-            let dialog = dialog.clone();
-            move |_| {
-                on_change(Change::Opened {
-                    slug: slug.clone(),
-                    thread: thread.clone(),
+        // A job that makes a fresh chat each run has nothing to open until it
+        // has run once. Insensitive with a reason rather than hidden — a button
+        // that appears and disappears between rows is harder to learn than one
+        // that greys out.
+        match entry.thread.clone() {
+            Some(thread) => {
+                let on_change = on_change.clone();
+                let slug = entry.slug.clone();
+                let dialog = dialog.clone();
+                open.connect_clicked(move |_| {
+                    on_change(Change::Opened {
+                        slug: slug.clone(),
+                        thread: thread.clone(),
+                    });
+                    dialog.close();
                 });
-                dialog.close();
             }
-        });
+            None => {
+                open.set_sensitive(false);
+                open.set_tooltip_text(Some(
+                    "This job starts a new chat each time it runs — there is nothing to open yet",
+                ));
+            }
+        }
 
         let remove = gtk::Button::with_label("Remove Schedule");
         remove.set_valign(gtk::Align::Center);
         remove.add_css_class("destructive-action");
         remove.connect_clicked({
             let on_change = on_change.clone();
-            let slug = entry.slug.clone();
-            let thread = entry.thread.clone();
+            let id = entry.id.clone();
             let dialog = dialog.clone();
             move |button| {
-                // The chat and its answers stay; only the schedule goes.
-                // Destructive enough to be styled, cheap enough not to be a
-                // confirmation — the prompt is one dialog away from being set
-                // again, and the conversation is untouched.
-                on_change(Change::Deleted {
-                    slug: slug.clone(),
-                    thread: thread.clone(),
-                });
+                // The chat and its answers stay, and so does any *other*
+                // schedule landing in it — this removes one job, not the chat's
+                // scheduling. Destructive enough to be styled, cheap enough not
+                // to be a confirmation.
+                on_change(Change::Deleted { id: id.clone() });
                 button.set_sensitive(false);
                 dialog.close();
             }
@@ -799,12 +838,22 @@ where
 pub fn edit_schedule<F>(
     parent: &impl IsA<gtk::Widget>,
     chat: &str,
-    existing: Option<(crate::model::heartbeat::Schedule, String)>,
+    existing: Option<(
+        crate::model::heartbeat::Schedule,
+        String,
+        crate::model::heartbeat::Recovery,
+    )>,
     on_save: F,
 ) where
-    F: Fn(Option<(crate::model::heartbeat::Schedule, String)>) + 'static,
+    F: Fn(
+            Option<(
+                crate::model::heartbeat::Schedule,
+                String,
+                crate::model::heartbeat::Recovery,
+            )>,
+        ) + 'static,
 {
-    use crate::model::heartbeat::Schedule;
+    use crate::model::heartbeat::{Recovery, Schedule};
 
     let dialog = adw::Dialog::new();
     dialog.set_title("Schedule");
@@ -839,9 +888,31 @@ pub fn edit_schedule<F>(
     // shows it rather than a default that would overwrite it on save.
     let prompt_text = existing
         .as_ref()
-        .map(|(_, prompt)| prompt.clone())
+        .map(|(_, prompt, _)| prompt.clone())
         .unwrap_or_default();
-    match existing.as_ref().map(|(schedule, _)| *schedule) {
+
+    // What happens when the machine was off at the appointed hour. Three
+    // choices rather than a duration, because "later the same day" is what
+    // people mean and a number of minutes is a thing nobody can predict the
+    // behaviour of. Coalescing is not offered because it is not optional: a
+    // fortnight away yields one run whichever of these is picked.
+    let recoveries = gtk::StringList::new(&[
+        Recovery::OnTime.describe(),
+        Recovery::SameDay.describe(),
+        Recovery::Whenever.describe(),
+    ]);
+    let missed = adw::ComboRow::builder()
+        .title("If missed")
+        .subtitle("Only one run is ever made up, however many were missed")
+        .model(&recoveries)
+        .build();
+    missed.set_selected(match existing.as_ref().map(|(_, _, recovery)| *recovery) {
+        Some(Recovery::SameDay) => 1,
+        Some(Recovery::Whenever) => 2,
+        _ => 0,
+    });
+
+    match existing.as_ref().map(|(schedule, _, _)| *schedule) {
         Some(Schedule::Hours { hours: n }) => {
             kind.set_selected(0);
             hours.set_value(f64::from(n));
@@ -892,6 +963,7 @@ pub fn edit_schedule<F>(
     when.add(&hours);
     when.add(&time);
     when.add(&weekday);
+    when.add(&missed);
 
     let prompt = gtk::TextView::new();
     prompt.set_wrap_mode(gtk::WrapMode::WordChar);
@@ -957,6 +1029,8 @@ pub fn edit_schedule<F>(
         weekday,
         #[weak]
         prompt,
+        #[weak]
+        missed,
         #[strong]
         on_save,
         move |_| {
@@ -985,7 +1059,12 @@ pub fn edit_schedule<F>(
                 },
                 _ => Schedule::Daily { at },
             };
-            on_save(Some((schedule, asked)));
+            let recovery = match missed.selected() {
+                1 => Recovery::SameDay,
+                2 => Recovery::Whenever,
+                _ => Recovery::OnTime,
+            };
+            on_save(Some((schedule, asked, recovery)));
             dialog.close();
         }
     ));

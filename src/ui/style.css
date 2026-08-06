@@ -3,7 +3,7 @@
    keep working. */
 
 .turn-question {
-  padding: 12px 14px;
+  padding: 8px 12px;
   background-color: var(--card-bg-color);
 }
 
@@ -13,19 +13,19 @@
 .turn-answer,
 .turn-answer text {
   background: none;
-  line-height: 1.4;
+  line-height: 1.3;
 }
 
 /* A table in an answer is a real GtkGrid anchored where its source used to be,
    so it is ruled the way a table is rather than left as a column of pipes. */
 .md-table {
-  margin: 6px 0;
+  margin: 2px 0;
   border: 1px solid var(--card-shade-color);
   border-radius: 6px;
 }
 
 .md-table-cell {
-  padding: 4px 10px;
+  padding: 3px 8px;
 }
 
 /* The header is bold and ruled off rather than filled: a fill would paint
@@ -121,4 +121,12 @@
    something you can press. */
 .workflow-strip label:hover {
   opacity: 0.8;
+}
+
+/* The level meter in the voice window. It draws itself in its own colour,
+   which is set here rather than named in Rust so it follows the accent the
+   user picked — a meter with a colour compiled into it is a meter that is the
+   wrong colour on half the desktops it runs on. */
+.voice-meter {
+  color: var(--accent-bg-color);
 }

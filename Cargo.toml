@@ -43,6 +43,20 @@ pangocairo = "0.22"
 # the crate's `ui` half comes along for the ride until Brain gains a feature to
 # gate it. Pinned, because a vault format should not change under us silently.
 brain = { git = "https://github.com/mhagrelius/brain", rev = "52288a939cd735d24c0c09c300fa96cbed3f6e0c" }
+# The microphone and the speech models, shared with Scribe. Both apps grew
+# near-identical copies of `pw-record` on a pipe, the same loudness curve and the
+# same channel to the same two models; the copies drifted, and a bug fixed in
+# one stayed in the other. It is a path dependency on a sibling checkout, which
+# is the assumption `planner` and `magpie` already make and which `install.sh`
+# satisfies by building from the working tree.
+#
+# Why a linked crate rather than the subprocess this file reaches for everywhere
+# else: there is no process to spawn. Whisper on the CPU is slower and a second
+# `llama-server` would want VRAM the 27B has already taken — the model that
+# answers is the one that matters, and speech must not compete with it. Parakeet
+# int8 runs on the CPU at roughly 48x real time and asks the GPU for nothing.
+# `parakeet-rs` and its release-candidate `ort` are pinned in there.
+earshot = { path = "../earshot" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Timestamps on turns and threads, and the volatile date line in the prompt.

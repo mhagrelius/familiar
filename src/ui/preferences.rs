@@ -190,6 +190,419 @@ pub fn mail_group(
 /// Show the dialog. `on_change` is called on every edit — there is no Save
 /// button, which is the GNOME pattern: a preference takes effect when you set
 /// it.
+/// Everything about talking to it, in one page.
+///
+/// The shortcut is the feature, so it is the first thing on the page and it is
+/// set by pressing the keys rather than by spelling `<Super><Alt>space` into a
+/// text field. Where the desktop cannot register one — anything that is not
+/// GNOME — the switch is insensitive and says why, rather than latching while
+/// nothing happens.
+pub fn voice_page(
+    state: &Rc<RefCell<Preferences>>,
+    changed: &Rc<impl Fn() + 'static>,
+    current: &Preferences,
+) -> adw::PreferencesPage {
+    use crate::ui::voice::shortcut;
+
+    let page = adw::PreferencesPage::builder()
+        .title("Voice")
+        .icon_name("audio-input-microphone-symbolic")
+        .build();
+
+    let supported = shortcut::is_supported();
+    let accelerator = Rc::new(RefCell::new(
+        current
+            .settings
+            .voice_shortcut
+            .clone()
+            .unwrap_or_else(|| shortcut::DEFAULT_ACCELERATOR.to_string()),
+    ));
+
+    let keys = adw::ActionRow::builder().title("Shortcut").build();
+    let change = gtk::Button::with_label("Change…");
+    change.set_valign(gtk::Align::Center);
+    keys.add_suffix(&change);
+
+    let on = adw::SwitchRow::builder()
+        .title("Talk on a Keyboard Shortcut")
+        .subtitle("Press it anywhere to start listening, and again to send")
+        .active(current.settings.voice_shortcut.is_some())
+        .build();
+    if !supported {
+        on.set_sensitive(false);
+        on.set_tooltip_text(Some(
+            "This desktop does not provide GNOME's custom keyboard shortcuts. Bind a shortcut \
+             to “familiar --voice” in your desktop's own keyboard settings instead.",
+        ));
+    }
+
+    // The subtitle carries three different things — the key, that it is not
+    // registered, and what it collides with — so it is built in one place.
+    let describe = {
+        let accelerator = accelerator.clone();
+        let keys = keys.clone();
+        let on = on.clone();
+        move || {
+            let accel = accelerator.borrow().clone();
+            let label = shortcut::human_label(&accel);
+            let subtitle = match shortcut::conflict(&accel) {
+                Some(taken) if on.is_active() => {
+                    format!("{label} — GNOME already uses this for “{taken}”, so both will happen")
+                }
+                _ if !on.is_active() => format!("{label} — not registered"),
+                _ => label,
+            };
+            keys.set_subtitle(&subtitle);
+            keys.set_sensitive(on.is_active());
+        }
+    };
+    let describe = Rc::new(describe);
+    describe();
+
+    on.connect_active_notify(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        #[strong]
+        accelerator,
+        #[strong]
+        describe,
+        move |row| {
+            let accel = accelerator.borrow().clone();
+            if row.is_active() {
+                match shortcut::install(&accel) {
+                    Ok(()) => state.borrow_mut().settings.voice_shortcut = Some(accel),
+                    Err(error) => {
+                        row.set_subtitle(&error.to_string());
+                        row.set_active(false);
+                        return;
+                    }
+                }
+            } else {
+                shortcut::remove();
+                state.borrow_mut().settings.voice_shortcut = None;
+            }
+            describe();
+            changed();
+        }
+    ));
+
+    change.connect_clicked(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        #[strong]
+        accelerator,
+        #[strong]
+        describe,
+        #[weak]
+        keys,
+        move |_| {
+            capture_shortcut(
+                &keys,
+                clone!(
+                    #[strong]
+                    state,
+                    #[strong]
+                    changed,
+                    #[strong]
+                    accelerator,
+                    #[strong]
+                    describe,
+                    move |accel: String| {
+                        accelerator.replace(accel.clone());
+                        if state.borrow().settings.voice_shortcut.is_some() {
+                            let _ = shortcut::install(&accel);
+                            state.borrow_mut().settings.voice_shortcut = Some(accel);
+                            changed();
+                        }
+                        describe();
+                    }
+                ),
+            );
+        }
+    ));
+
+    let listening = adw::PreferencesGroup::builder()
+        .title("Listening")
+        .description(
+            "Speech is recognised on this machine and no audio leaves it. An utterance ends \
+             when you stop talking, so there is nothing to hold down.",
+        )
+        .build();
+    listening.add(&on);
+    listening.add(&keys);
+
+    // What is installed, said plainly. Speech needs a model this application
+    // does not ship, and a Voice page that says nothing about it would leave
+    // somebody pressing a shortcut that answers with an error every time.
+    let installed = crate::ui::voice::speech::is_installed();
+    let model = adw::ActionRow::builder()
+        .title("Speech Model")
+        .subtitle(if installed {
+            "Installed"
+        } else {
+            "Not installed — see the Voice section of the README for the two commands that \
+             fetch it. Everything else on this page works without it; listening does not."
+        })
+        .build();
+    model.add_prefix(&gtk::Image::from_icon_name(if installed {
+        "object-select-symbolic"
+    } else {
+        "dialog-warning-symbolic"
+    }));
+    listening.add(&model);
+
+    // A dropdown of what is actually plugged in, not a text field wanting a
+    // PipeWire node name. Which microphone is picked decides whether talking
+    // over the answer works at all: a conference webcam suppresses the
+    // assistant's own voice as noise and takes a good deal of the person
+    // talking over it with it.
+    let devices = crate::ui::voice::recorder::sources();
+    let names = gtk::StringList::new(&["System default"]);
+    for device in &devices {
+        names.append(&device.description);
+    }
+    let microphone = adw::ComboRow::builder()
+        .title("Microphone")
+        .subtitle(
+            "A webcam's microphone often removes what the speakers are playing, and some of \
+             you with it. Pick a plain one if talking over the answer does not work",
+        )
+        .model(&names)
+        .build();
+    let chosen = devices
+        .iter()
+        .position(|device| device.name == current.settings.voice_source)
+        .map_or(0, |at| at as u32 + 1);
+    microphone.set_selected(chosen);
+    microphone.connect_selected_notify(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        #[strong]
+        devices,
+        move |row| {
+            let selected = row.selected() as usize;
+            state.borrow_mut().settings.voice_source = match selected.checked_sub(1) {
+                Some(at) => devices.get(at).map(|d| d.name.clone()).unwrap_or_default(),
+                // The system default, which is what almost everybody wants
+                // until it turns out their default is a webcam.
+                None => String::new(),
+            };
+            changed();
+        }
+    ));
+    listening.add(&microphone);
+    page.add(&listening);
+
+    // -- what it says back ----------------------------------------------------
+    let modes = gtk::StringList::new(&["Not aloud", "Desktop voice", "Speech server"]);
+    let reply = adw::ComboRow::builder()
+        .title("Read Answers Aloud")
+        .model(&modes)
+        .build();
+    reply.set_selected(match current.settings.voice_reply.as_str() {
+        "off" => 0,
+        "endpoint" => 2,
+        _ => 1,
+    });
+
+    let endpoint = adw::EntryRow::builder().title("Speech Server").build();
+    endpoint.set_text(&current.settings.voice_endpoint);
+    let name = adw::EntryRow::builder().title("Voice").build();
+    name.set_text(&current.settings.voice_name);
+    let rate = adw::SpinRow::with_range(8_000.0, 48_000.0, 1_000.0);
+    rate.set_title("Sample Rate");
+    rate.set_subtitle("What the server's raw PCM comes back at. Kokoro's is 24000");
+    rate.set_value(f64::from(current.settings.voice_rate));
+
+    let only_endpoint = {
+        let endpoint = endpoint.clone();
+        let name = name.clone();
+        let rate = rate.clone();
+        move |selected: u32| {
+            let server = selected == 2;
+            endpoint.set_sensitive(server);
+            name.set_sensitive(server);
+            rate.set_sensitive(server);
+        }
+    };
+    only_endpoint(reply.selected());
+
+    reply.connect_selected_notify(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            let mode = match row.selected() {
+                0 => "off",
+                2 => "endpoint",
+                _ => "desktop",
+            };
+            state.borrow_mut().settings.voice_reply = mode.to_string();
+            only_endpoint(row.selected());
+            changed();
+        }
+    ));
+    endpoint.connect_changed(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            state.borrow_mut().settings.voice_endpoint = row.text().trim().to_string();
+            changed();
+        }
+    ));
+    name.connect_changed(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            state.borrow_mut().settings.voice_name = row.text().trim().to_string();
+            changed();
+        }
+    ));
+    rate.connect_changed(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            state.borrow_mut().settings.voice_rate = row.value() as u32;
+            changed();
+        }
+    ));
+
+    let speaking = adw::PreferencesGroup::builder()
+        .title("Speaking")
+        .description(
+            "The desktop voice is speech-dispatcher, which is already installed and sounds \
+             like it. A speech server is anything with an OpenAI-shaped /v1/audio/speech — \
+             Kokoro is the one this was written against — which sounds like a person and is \
+             one more thing to keep running.",
+        )
+        .build();
+    speaking.add(&reply);
+    speaking.add(&endpoint);
+    speaking.add(&name);
+    speaking.add(&rate);
+    page.add(&speaking);
+
+    // -- where it goes --------------------------------------------------------
+    let follow_up = adw::SpinRow::with_range(0.0, 60.0, 1.0);
+    follow_up.set_title("Carry On for");
+    follow_up.set_subtitle(
+        "Minutes after a spoken answer that the next question continues the same chat. \
+         Zero starts a new one every time",
+    );
+    follow_up.set_value(current.settings.voice_follow_up as f64);
+    follow_up.connect_changed(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            state.borrow_mut().settings.voice_follow_up = row.value() as i64;
+            changed();
+        }
+    ));
+
+    let converse = adw::SwitchRow::builder()
+        .title("Keep Listening After It Answers")
+        .subtitle("Carry on talking without pressing anything. Say nothing and it stops on its own")
+        .active(current.settings.voice_converse)
+        .build();
+    converse.connect_active_notify(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            state.borrow_mut().settings.voice_converse = row.is_active();
+            changed();
+        }
+    ));
+
+    let chats = adw::PreferencesGroup::builder()
+        .title("Chats")
+        .description(
+            "A spoken question is an ordinary chat in whichever project is open, so \
+             everything else — memory, schedules, the sidebar — applies to it. The voice \
+             window names the chat it is continuing and can start a new one instead.",
+        )
+        .build();
+    chats.add(&converse);
+    chats.add(&follow_up);
+    page.add(&chats);
+
+    page
+}
+
+/// Ask for a shortcut by having it pressed.
+///
+/// A modifier on its own is not a shortcut, so those are ignored rather than
+/// accepted — otherwise letting go of Super after opening this would set it.
+fn capture_shortcut(parent: &impl IsA<gtk::Widget>, on_chosen: impl Fn(String) + 'static) {
+    use crate::ui::voice::shortcut;
+
+    let dialog = adw::AlertDialog::new(
+        Some("Press the New Shortcut"),
+        Some("Press the keys you want to use, or Escape to keep the one you have."),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.set_close_response("cancel");
+
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(clone!(
+        #[weak]
+        dialog,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, modifiers| {
+            if key == gtk::gdk::Key::Escape {
+                dialog.close();
+                return glib::Propagation::Stop;
+            }
+            let modifiers = modifiers & gtk::accelerator_get_default_mod_mask();
+            let bare_modifier = matches!(
+                key,
+                gtk::gdk::Key::Shift_L
+                    | gtk::gdk::Key::Shift_R
+                    | gtk::gdk::Key::Control_L
+                    | gtk::gdk::Key::Control_R
+                    | gtk::gdk::Key::Alt_L
+                    | gtk::gdk::Key::Alt_R
+                    | gtk::gdk::Key::Super_L
+                    | gtk::gdk::Key::Super_R
+                    | gtk::gdk::Key::Meta_L
+                    | gtk::gdk::Key::Meta_R
+                    | gtk::gdk::Key::Hyper_L
+                    | gtk::gdk::Key::Hyper_R
+            );
+            if bare_modifier || modifiers.is_empty() {
+                // A bare letter would be caught while typing anywhere on the
+                // desktop. GNOME would take it; the user would not know why.
+                return glib::Propagation::Stop;
+            }
+            let accel = gtk::accelerator_name(key, modifiers);
+            if shortcut::is_parsable(&accel) {
+                on_chosen(accel.to_string());
+                dialog.close();
+            }
+            glib::Propagation::Stop
+        }
+    ));
+    dialog.add_controller(keys);
+    dialog.present(Some(parent));
+}
+
 pub fn present<F>(parent: &impl IsA<gtk::Widget>, current: &Preferences, on_change: F)
 where
     F: Fn(Preferences) + 'static,
@@ -548,6 +961,34 @@ where
     // and for the same reason: the second row only means anything when the
     // first is on, so it goes insensitive with it rather than sitting there
     // doing nothing.
+    // Its own group, because it is about the application rather than about
+    // memory or the model — and because it is the switch that decides whether
+    // a scheduled chat runs at all when the window is shut.
+    let background = adw::SwitchRow::builder()
+        .title("Keep Running in the Background")
+        .subtitle("Closing the window leaves Familiar running so scheduled chats still happen")
+        .active(current.settings.background)
+        .build();
+    background.connect_active_notify(clone!(
+        #[strong]
+        state,
+        #[strong]
+        changed,
+        move |row| {
+            state.borrow_mut().settings.background = row.is_active();
+            changed();
+        }
+    ));
+    let running = adw::PreferencesGroup::builder()
+        .title("Running")
+        .description(
+            "A scheduled chat can only run while Familiar is running. With this off it quits \
+             when you close the window, and anything due while it was shut is picked up the \
+             next time you open it — if the schedule says a missed run is still worth doing.",
+        )
+        .build();
+    running.add(&background);
+
     let passive = adw::SwitchRow::builder()
         .title("Remember What You Mention")
         .subtitle("Read each finished turn for durable facts and save them without being asked")
@@ -620,8 +1061,11 @@ where
     memory.add(&dreaming);
     memory.add(&hour);
     memory.add(&vault);
+    behaviour.add(&running);
     behaviour.add(&memory);
     dialog.add(&behaviour);
+
+    dialog.add(&voice_page(&state, &changed, current));
 
     dialog.present(Some(parent));
 }

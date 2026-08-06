@@ -77,7 +77,7 @@ fn main() {
     render(
         &conversation,
         760,
-        620,
+        1500,
         &format!("{out}/conversation-{scheme}.png"),
     );
 
@@ -119,6 +119,45 @@ fn main() {
         let page = adw::PreferencesPage::new();
         page.add(&mail_group(&state, &changed, &current));
         render(&page, 560, 420, &format!("{out}/mail-{scheme}.png"));
+    }
+
+    // The voice window, in the two states worth looking at: hearing somebody,
+    // and having answered them. It is its own window rather than a widget, so
+    // it is presented and snapshotted like the main one.
+    {
+        use familiar::ui::voice::{State, VoiceWindow};
+        for (name, seed) in [("idle", 2), ("listening", 0), ("answered", 1)] {
+            let voice = VoiceWindow::new();
+            voice.set_default_size(460, 300);
+            if seed == 2 {
+                voice.set_chat(None);
+                voice.set_state(State::Idle);
+            } else if seed == 0 {
+                voice.set_chat(None);
+                voice.set_state(State::Listening);
+                voice.set_heard("what did I say about the deploy", false);
+                for level in [0.1, 0.4, 0.7, 0.5, 0.3, 0.6, 0.8, 0.4, 0.2, 0.5, 0.9, 0.3] {
+                    voice.hear(level);
+                }
+            } else {
+                voice.set_chat(Some("The deploy"));
+                voice.set_state(State::Speaking);
+                voice.set_heard("what did I say about the deploy", true);
+                voice.set_answer(
+                    "It went out at four this afternoon and nothing failed. You said you \
+                     wanted the migration checked before Friday, which has not happened yet.",
+                );
+            }
+            voice.present();
+            settle();
+            snapshot(
+                &voice,
+                460,
+                300,
+                &format!("{out}/voice-{name}-{scheme}.png"),
+            );
+            voice.destroy();
+        }
     }
 
     // The whole window, which is the only preview that shows the proportions
@@ -332,7 +371,75 @@ fn seeded() -> Thread {
         finish: Some(Finish::Stop),
         ..Default::default()
     });
+    thread.push_turn(long_form());
     thread
+}
+
+/// The shape an answer to a research question actually takes: a run of chips,
+/// headings, prose, a table and a code block. Density is what this one is for —
+/// every other fixture is short enough that the spacing between blocks never
+/// adds up to anything, which is how a conversation that scrolls for a page and
+/// a half was signed off from previews that fit on one screen.
+fn long_form() -> StoredTurn {
+    let searched = |query: &str| StoredToolCall {
+        id: format!("call_{query}"),
+        name: "web_search".into(),
+        arguments: query.into(),
+        outcome: Some(ToolOutcome::Ok("6 results".into())),
+    };
+    StoredTurn {
+        at: Some(Utc::now()),
+        user: "I have two laptops with 128 GB of RAM each. Can I serve a 4-bit quantisation \
+               across both of them, and what do people doing this settle on?"
+            .into(),
+        images: Vec::new(),
+        thinking: "Two questions: whether it fits at all, and what the stack looks like. The \
+                   memory arithmetic decides the first one and the answer is no."
+            .into(),
+        answer: "This is a timely question — the ecosystem converged fast over the last few \
+                 months. Here is what the consensus looks like.\n\n\
+                 ## The hard constraint is memory\n\n\
+                 The 4-bit weights are **378 GB**. Two machines at 128 GB gives you 256 GB, so \
+                 the model does not fit: you need *at least three*, and four with headroom for \
+                 the KV cache and the OS.\n\n\
+                 ## The stack that has emerged\n\n\
+                 | Layer | Tool | Role |\n\
+                 | --- | --- | --- |\n\
+                 | Orchestration | Exo | Discovers nodes, shards the model, speaks the \
+                 OpenAI API |\n\
+                 | Interconnect | RDMA or ring over TCP | Tensor parallelism against pipeline \
+                 parallelism |\n\
+                 | Inference | MLX | Per-node engine, ahead on long context |\n\n\
+                 Both vendors document this natively now.\n\n\
+                 ## Setting it up\n\n\
+                 ```sh\n\
+                 rdma_ctl enable\n\
+                 exo --discovery manual --node-id one\n\
+                 ```\n\n\
+                 Then the parts worth knowing before you spend a weekend on it:\n\n\
+                 - Thunderbolt gives you the bandwidth but not the latency\n\
+                 - A ring is easier to bring up than a mesh and slower at every token\n\
+                 - Quantisation below 4-bit costs more than the machine you save\n\n\
+                 If the third machine is not an option, the honest answer is a smaller model."
+            .into(),
+        tool_calls: vec![
+            searched("RDMA over Thunderbolt for model serving"),
+            searched("serving large models across two laptops"),
+            searched("4-bit quantisation memory footprint"),
+            searched("cluster interconnect best practices"),
+            searched("distributed inference tokens per second"),
+        ],
+        finish: Some(Finish::Stop),
+        metrics: Some(TurnMetrics {
+            prompt_tokens: 4_180,
+            generated_tokens: 610,
+            generation_per_second: Some(71.0),
+            time_to_first_token_ms: Some(410),
+            thinking_ms: Some(5_100),
+            draft_acceptance: Some(0.79),
+            ..Default::default()
+        }),
+    }
 }
 
 /// Two short turns: enough to show a question, an answer and the numbers, and

@@ -17,11 +17,16 @@
 //! time now, and a laptop that was asleep in between, should this fire? No cron
 //! crate answers that, so a dependency would buy the easy half.
 //!
-//! **A missed run is skipped, not caught up.** A 07:00 briefing delivered at
-//! 14:00 is worse than no briefing: the weather is stale, the pull requests
-//! have moved, and the user did not ask for it now. Claude Code Desktop skips
-//! explicitly when the machine slept through; OpenClaw skips and waits for the
-//! next occurrence. [`GRACE`] is how late is still on time.
+//! **A missed run is coalesced, and then it is the job's call.** Only the most
+//! recent missed occurrence is ever a candidate ([`Schedule::latest_due`]), so
+//! a fortnight away produces one run and not fourteen — that is what makes
+//! recovery safe to offer at all, and it is true whatever policy a job picks.
+//! What is left is staleness, which differs per job: a 07:00 briefing at 14:00
+//! is worse than no briefing, but a power cut overnight should not cost you the
+//! briefing at 08:40, and "did the backup finish" is worth knowing whenever you
+//! next sit down. [`Recovery`] is that choice. Claude Code Desktop and OpenClaw
+//! both skip unconditionally; systemd's `Persistent=` and anacron both
+//! coalesce, and this is the second shape.
 //!
 //! Everything here is a pure function over `chrono`, so it is tested with no
 //! display, no timer and no clock — the times are passed in.
@@ -29,11 +34,12 @@
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Weekday};
 use serde::{Deserialize, Serialize};
 
-/// How late a run may be and still be worth doing.
+/// How late a run may be and still count as merely late.
 ///
 /// The tick is every minute and a busy turn can defer a run, so a few minutes
-/// of slack is ordinary. Beyond this the machine was asleep or the app was shut,
-/// and the moment has passed.
+/// of slack is ordinary. Beyond this the machine was asleep or the app was
+/// shut, and whether the moment has passed is [`Recovery`]'s question rather
+/// than a constant's — this is the answer for [`Recovery::OnTime`] only.
 pub const GRACE: Duration = Duration::minutes(20);
 
 /// When a thread wakes.
@@ -70,9 +76,71 @@ pub enum Due {
     /// Within the grace window but not on the minute — the app was busy, or
     /// the tick was late.
     Late,
-    /// It has never run. The first occurrence after it was set up is a normal
-    /// run, not a catch-up for every occurrence since the beginning of time.
-    First,
+    /// The occurrence passed while nothing was running — the machine was off,
+    /// asleep, or the app was not up — and the job's [`Recovery`] says it is
+    /// still worth doing. Only ever the *most recent* missed occurrence, so a
+    /// fortnight away produces one run rather than fourteen.
+    Recovered,
+}
+
+/// How late a missed occurrence may be and still be worth running.
+///
+/// A power cut overnight should not cost you the morning briefing; a fortnight
+/// away should not produce a fortnight of them. Those are two different
+/// questions and only the first one is a policy — the second is answered by
+/// [`Schedule::latest_due`] considering *only* the most recent missed
+/// occurrence, so coalescing happens whatever is chosen here.
+///
+/// What is left is per job: how stale is too stale. A briefing is worthless by
+/// the evening; "did the backup finish" is worth knowing whenever you next sit
+/// down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Recovery {
+    /// Only if it is essentially on time — [`GRACE`], and no more. What every
+    /// schedule did before this existed, and still the right answer for
+    /// anything whose whole value is the hour it arrives at.
+    #[default]
+    OnTime,
+    /// Later the same calendar day still counts. The briefing missed because
+    /// the power was out at 07:00 is worth having at 08:40; tomorrow's is not
+    /// worth having as well, and this is what stops it.
+    ///
+    /// Literally the same date rather than a window of hours, because that is
+    /// what the label promises and a scheduling rule people cannot predict is
+    /// worse than one that is occasionally generous. Turning the machine on at
+    /// 22:00 does deliver the morning's run — the preamble tells the model it
+    /// is a recovery and what time it actually is.
+    SameDay,
+    /// Whenever the machine is next on. For work that does not go stale.
+    Whenever,
+}
+
+impl Recovery {
+    /// Whether an occurrence at `scheduled` is still worth running at `now`.
+    ///
+    /// `now` is assumed to be at or after `scheduled`; the caller has already
+    /// established the occurrence has passed.
+    pub fn allows(&self, scheduled: DateTime<Local>, now: DateTime<Local>) -> bool {
+        match self {
+            Self::OnTime => now - scheduled <= GRACE,
+            // Calendar-anchored rather than a duration, because "the same day"
+            // is what people mean and a 23:50 job would otherwise recover into
+            // the following morning under any fixed window wide enough to be
+            // useful at 07:00.
+            Self::SameDay => now.date_naive() == scheduled.date_naive(),
+            Self::Whenever => true,
+        }
+    }
+
+    /// How this reads in the editor.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::OnTime => "Only if on time",
+            Self::SameDay => "Later the same day",
+            Self::Whenever => "Whenever the computer is next on",
+        }
+    }
 }
 
 impl Schedule {
@@ -118,36 +186,83 @@ impl Schedule {
         }
     }
 
-    /// Whether to run now, and why.
+    /// The most recent occurrence at or before `now` that `last` has not
+    /// already covered.
     ///
-    /// `last` is when this thread last woke — `None` if it never has. The rule
-    /// is the whole design: fire when the scheduled moment has passed and is
-    /// still within [`GRACE`]; otherwise let it go. That is what makes a laptop
-    /// closed overnight produce silence in the morning rather than a stale
-    /// briefing at lunchtime.
-    pub fn due(&self, last: Option<DateTime<Local>>, now: DateTime<Local>) -> Option<Due> {
-        let Some(last) = last else {
-            // Never run. The first occurrence is scheduled from *now*, so
-            // setting up a 7am daily at 9am does not immediately fire for a
-            // 7am that was already gone.
-            return None;
+    /// This is the coalescing step, and it is what keeps recovery safe: however
+    /// many firings were missed, only the newest is ever a candidate, so a
+    /// fortnight away collapses to one run rather than fourteen. `None` when
+    /// nothing has come round since `last`.
+    pub fn latest_due(
+        &self,
+        last: DateTime<Local>,
+        now: DateTime<Local>,
+    ) -> Option<DateTime<Local>> {
+        let candidate = match self {
+            // Relative to the last run rather than to a wall-clock grid —
+            // that is what `next_after` means for this variant — so the most
+            // recent occurrence is the largest whole number of steps that
+            // still fits before `now`.
+            Self::Hours { hours } => {
+                let hours = (*hours).clamp(1, 24) as i64;
+                let steps = (now - last).num_seconds() / (hours * 3600);
+                if steps < 1 {
+                    return None;
+                }
+                last + Duration::hours(steps * hours)
+            }
+            Self::Daily { at } => {
+                let today = at_local(now.date_naive(), *at);
+                if today <= now {
+                    today
+                } else {
+                    at_local(now.date_naive() - Duration::days(1), *at)
+                }
+            }
+            Self::Weekdays { at } => back_from(now, *at, is_weekday)?,
+            Self::Weekly { day: wanted, at } => back_from(now, *at, |day| day == *wanted)?,
         };
+        (candidate > last).then_some(candidate)
+    }
 
-        let scheduled = self.next_after(last);
-        if scheduled > now {
+    /// Whether to run now, why, and which occurrence it is for.
+    ///
+    /// `last` is when this thread last woke — `None` if it never has. Find the
+    /// most recent occurrence that has passed and has not already run, then ask
+    /// `recovery` whether it is still worth doing.
+    ///
+    /// Measuring from the *most recent* missed occurrence rather than the first
+    /// one is what makes recovery possible at all. `next_after(last)` is the
+    /// oldest thing missed, so after a fortnight away it is a fortnight stale
+    /// and every policy discards it — which read as "a gap is skipped" but was
+    /// really "lateness was measured against the wrong occurrence".
+    ///
+    /// The occurrence comes back with the verdict because the caller needs it
+    /// for [`preamble`], and computing it a second time is how the two came to
+    /// disagree.
+    pub fn due(
+        &self,
+        last: Option<DateTime<Local>>,
+        now: DateTime<Local>,
+        recovery: Recovery,
+    ) -> Option<(Due, DateTime<Local>)> {
+        // Never run. The first occurrence is scheduled from *now*, so setting
+        // up a 7am daily at 9am does not immediately fire for a 7am that was
+        // already gone.
+        let last = last?;
+        let scheduled = self.latest_due(last, now)?;
+        if !recovery.allows(scheduled, now) {
             return None;
         }
-        // The moment has passed. Only act on it if it passed recently — and
-        // measure from the *scheduled* time, not from the last run, or a job
-        // that has not run for a week would look infinitely late.
-        if now - scheduled > GRACE {
-            return None;
-        }
-        Some(if now - scheduled < Duration::minutes(2) {
+        let behind = now - scheduled;
+        let why = if behind < Duration::minutes(2) {
             Due::Regular
-        } else {
+        } else if behind <= GRACE {
             Due::Late
-        })
+        } else {
+            Due::Recovered
+        };
+        Some((why, scheduled))
     }
 
     /// The first run after a schedule is set, so `due` has somewhere to start.
@@ -296,12 +411,6 @@ pub fn guidance() -> String {
         .to_string()
 }
 
-/// What the model is told when a turn was started by the clock rather than by a
-/// person.
-///
-/// It matters that it knows. A turn that opens "as you asked" when nobody asked
-/// is wrong, and a run that is twelve minutes late should be able to say so
-/// rather than reporting a stale time as current.
 pub fn preamble(due: Due, scheduled_for: DateTime<Local>) -> String {
     let when = scheduled_for.format("%A %-d %B at %H:%M");
     match due {
@@ -309,6 +418,19 @@ pub fn preamble(due: Due, scheduled_for: DateTime<Local>) -> String {
             "This is a scheduled run for {when}, running a little late. Nobody is necessarily \
              at the keyboard. Do the work and report it plainly; if anything you found is \
              time-sensitive, say what time it is true as of."
+        ),
+        // Said here rather than in the system prompt because this is the only
+        // place the model finds out, and getting it wrong is loud: a briefing
+        // recovered at 08:40 that opens with "good morning" as though it were
+        // 07:00, or reports last night's forecast as today's, reads as the
+        // assistant not knowing what time it is.
+        Due::Recovered => format!(
+            "This is a scheduled run for {when}, recovered late — the computer was off or \
+             asleep when it came round, and this is the first chance to do it. Only this one \
+             is being run; any earlier occurrences were let go. Nobody is necessarily at the \
+             keyboard. Do the work against the time it is *now*, not the time it was due: \
+             greet the hour it actually is, refetch anything that moves, and say what each \
+             time-sensitive thing is true as of."
         ),
         _ => format!(
             "This is a scheduled run for {when}. Nobody is necessarily at the keyboard, so do \
@@ -320,6 +442,27 @@ pub fn preamble(due: Due, scheduled_for: DateTime<Local>) -> String {
 
 fn is_weekday(day: Weekday) -> bool {
     !matches!(day, Weekday::Sat | Weekday::Sun)
+}
+
+/// The newest occurrence of `at` on a matching day, at or before `now`.
+///
+/// Eight days rather than seven: when today matches but its time of day is
+/// still ahead of `now`, the answer is the same weekday a week ago, and a
+/// seven-step walk stops one day short of it.
+fn back_from(
+    now: DateTime<Local>,
+    at: NaiveTime,
+    matches: impl Fn(Weekday) -> bool,
+) -> Option<DateTime<Local>> {
+    let mut day = now.date_naive();
+    for _ in 0..8 {
+        let candidate = at_local(day, at);
+        if candidate <= now && matches(day.weekday()) {
+            return Some(candidate);
+        }
+        day -= Duration::days(1);
+    }
+    None
 }
 
 fn clock_face(at: NaiveTime) -> String {
@@ -555,17 +698,23 @@ mod tests {
         // Setting up a 07:00 daily at 09:00 must not instantly fire for the
         // 07:00 that has already gone.
         let daily = Schedule::Daily { at: at(7, 0) };
-        assert_eq!(daily.due(None, local("2026-08-03 09:00")), None);
+        assert_eq!(
+            daily.due(None, local("2026-08-03 09:00"), Recovery::OnTime),
+            None
+        );
     }
 
     #[test]
     fn a_run_fires_once_the_moment_has_passed() {
         let daily = Schedule::Daily { at: at(7, 0) };
         let last = local("2026-08-02 07:00");
-        assert_eq!(daily.due(Some(last), local("2026-08-03 06:59")), None);
         assert_eq!(
-            daily.due(Some(last), local("2026-08-03 07:00")),
-            Some(Due::Regular)
+            daily.due(Some(last), local("2026-08-03 06:59"), Recovery::OnTime),
+            None
+        );
+        assert_eq!(
+            daily.due(Some(last), local("2026-08-03 07:00"), Recovery::OnTime),
+            Some((Due::Regular, local("2026-08-03 07:00")))
         );
     }
 
@@ -576,45 +725,171 @@ mod tests {
         let daily = Schedule::Daily { at: at(7, 0) };
         let last = local("2026-08-02 07:00");
         assert_eq!(
-            daily.due(Some(last), local("2026-08-03 07:10")),
-            Some(Due::Late)
+            daily.due(Some(last), local("2026-08-03 07:10"), Recovery::OnTime),
+            Some((Due::Late, local("2026-08-03 07:00")))
         );
     }
 
     #[test]
-    fn a_run_the_machine_slept_through_is_skipped_not_caught_up() {
-        // The decision this module exists to make. A 07:00 briefing delivered
-        // at 14:00 is worse than none: the weather is stale, the pull requests
-        // have moved, and nobody asked for it now.
+    fn a_run_the_machine_slept_through_is_skipped_when_the_job_says_on_time() {
+        // A 07:00 briefing delivered at 14:00 is worse than none if that is
+        // what the job asked for: the weather is stale, the pull requests have
+        // moved, and nobody asked for it now.
         let daily = Schedule::Daily { at: at(7, 0) };
         let last = local("2026-08-02 07:00");
-        assert_eq!(daily.due(Some(last), local("2026-08-03 14:00")), None);
+        assert_eq!(
+            daily.due(Some(last), local("2026-08-03 14:00"), Recovery::OnTime),
+            None
+        );
     }
 
     #[test]
-    fn a_schedule_that_has_not_run_for_a_week_is_not_infinitely_late() {
-        // Lateness is measured from the scheduled moment, not from the last
-        // run — otherwise a fortnight of downtime makes every occurrence look
-        // impossibly overdue and nothing ever fires again.
+    fn the_power_cut_case_recovers_the_same_morning() {
+        // The case this was built for: the machine was off at 07:00 and comes
+        // back at 08:40. That is not a missed briefing, it is a late one.
+        let daily = Schedule::Daily { at: at(7, 0) };
+        let last = local("2026-08-02 07:00");
+        assert_eq!(
+            daily.due(Some(last), local("2026-08-03 08:40"), Recovery::SameDay),
+            Some((Due::Recovered, local("2026-08-03 07:00")))
+        );
+        // The next day is a different day, and one briefing per day is the
+        // whole point.
+        assert_eq!(
+            daily.due(Some(last), local("2026-08-04 08:40"), Recovery::SameDay),
+            Some((Due::Recovered, local("2026-08-04 07:00"))),
+            "should recover *that* day's, not the one it missed"
+        );
+    }
+
+    #[test]
+    fn a_fortnight_away_produces_one_run_and_not_fourteen() {
+        // Coalescing, which is what makes recovery safe to offer at all. The
+        // most recent occurrence is the only candidate however many were
+        // missed — so even the most permissive policy fires once.
         let daily = Schedule::Daily { at: at(7, 0) };
         let last = local("2026-07-20 07:00");
-        // The occurrence after `last` is 21 July, long gone: skipped.
-        assert_eq!(daily.due(Some(last), local("2026-08-03 09:00")), None);
-        // But once the clock reaches the next one, it fires normally.
+        let back = local("2026-08-03 09:00");
         assert_eq!(
-            daily.due(Some(local("2026-08-02 07:00")), local("2026-08-03 07:01")),
-            Some(Due::Regular)
+            daily.due(Some(last), back, Recovery::Whenever),
+            Some((Due::Recovered, local("2026-08-03 07:00"))),
+            "the candidate is this morning's, not the fourteen before it"
+        );
+        // And once that run is recorded, nothing else is owed until tomorrow.
+        assert_eq!(daily.due(Some(back), back, Recovery::Whenever), None);
+    }
+
+    #[test]
+    fn lateness_is_measured_from_the_newest_missed_occurrence() {
+        // The defect this replaced: `next_after(last)` is the *oldest* thing
+        // missed, so after a gap every policy discarded it as impossibly
+        // overdue and recovery could not be built on top.
+        let daily = Schedule::Daily { at: at(7, 0) };
+        let last = local("2026-07-20 07:00");
+        assert_eq!(
+            daily.latest_due(last, local("2026-08-03 09:00")),
+            Some(local("2026-08-03 07:00"))
+        );
+        assert_eq!(
+            daily.next_after(last),
+            local("2026-07-21 07:00"),
+            "the old measure, kept for scheduling forwards"
         );
     }
 
     #[test]
-    fn the_grace_window_is_the_boundary() {
+    fn the_grace_window_is_the_boundary_for_on_time() {
         let daily = Schedule::Daily { at: at(7, 0) };
         let last = local("2026-08-02 07:00");
-        let inside = local("2026-08-03 07:00") + GRACE - Duration::minutes(1);
-        let outside = local("2026-08-03 07:00") + GRACE + Duration::minutes(1);
-        assert_eq!(daily.due(Some(last), inside), Some(Due::Late));
-        assert_eq!(daily.due(Some(last), outside), None);
+        let due_at = local("2026-08-03 07:00");
+        let inside = due_at + GRACE - Duration::minutes(1);
+        let outside = due_at + GRACE + Duration::minutes(1);
+        assert_eq!(
+            daily.due(Some(last), inside, Recovery::OnTime),
+            Some((Due::Late, due_at))
+        );
+        assert_eq!(daily.due(Some(last), outside, Recovery::OnTime), None);
+        // The same moment is a recovery rather than nothing, for a job that
+        // asked for one.
+        assert_eq!(
+            daily.due(Some(last), outside, Recovery::SameDay),
+            Some((Due::Recovered, due_at))
+        );
+    }
+
+    #[test]
+    fn latest_due_agrees_with_walking_next_after_forwards() {
+        // `next_after` defines the occurrence grid, so the newest occurrence
+        // at or before now must be the last step of a walk along it. Checked
+        // rather than assumed, because the two are computed separately.
+        for schedule in [
+            Schedule::Hours { hours: 4 },
+            Schedule::Daily { at: at(7, 0) },
+            Schedule::Weekdays { at: at(8, 15) },
+            Schedule::Weekly {
+                day: Weekday::Mon,
+                at: at(9, 0),
+            },
+        ] {
+            let last = local("2026-07-20 05:00");
+            let now = local("2026-08-03 09:00");
+            let mut walked = None;
+            let mut cursor = last;
+            loop {
+                let next = schedule.next_after(cursor);
+                if next > now {
+                    break;
+                }
+                walked = Some(next);
+                cursor = next;
+            }
+            assert_eq!(
+                schedule.latest_due(last, now),
+                walked,
+                "{schedule:?} disagreed with the walk"
+            );
+        }
+    }
+
+    #[test]
+    fn weekly_recovery_does_not_reach_back_past_its_own_day() {
+        // A Monday 09:00 job, asked on the Wednesday. The most recent
+        // occurrence is Monday — not "today at nine", which never happens.
+        let weekly = Schedule::Weekly {
+            day: Weekday::Mon,
+            at: at(9, 0),
+        };
+        let last = local("2026-07-27 09:00");
+        assert_eq!(
+            weekly.latest_due(last, local("2026-08-05 12:00")),
+            Some(local("2026-08-03 09:00")),
+            "2026-08-03 is a Monday"
+        );
+    }
+
+    #[test]
+    fn weekdays_recovery_skips_back_over_the_weekend() {
+        let weekdays = Schedule::Weekdays { at: at(7, 0) };
+        // 2026-08-09 is a Sunday; the newest weekday occurrence is Friday's.
+        let last = local("2026-08-06 07:00");
+        assert_eq!(
+            weekdays.latest_due(last, local("2026-08-09 11:00")),
+            Some(local("2026-08-07 07:00")),
+            "2026-08-07 is a Friday"
+        );
+    }
+
+    #[test]
+    fn a_recovered_run_tells_the_model_it_is_catching_up() {
+        // Without this a briefing recovered at 08:40 opens with "good morning"
+        // as though it were 07:00 and reports last night's forecast as today's.
+        let note = preamble(Due::Recovered, local("2026-08-03 07:00"));
+        assert!(note.contains("recovered late"), "{note}");
+        assert!(note.contains("off or asleep"), "{note}");
+        assert!(
+            note.contains("earlier occurrences were let go"),
+            "the model must not think it owes thirteen more: {note}"
+        );
     }
 
     #[test]

@@ -19,6 +19,26 @@ rm -f "$DATA_DIR/icons/hicolor/scalable/apps/$APP_ID.svg"
 rm -f "$DATA_DIR/icons/hicolor/symbolic/apps/$APP_ID-symbolic.svg"
 rm -f "$DATA_DIR/dbus-1/services/$APP_ID.service"
 
+# The voice shortcut lives in dconf rather than in a file, so removing the
+# binary would otherwise leave a key bound to a command that is gone. Only
+# ours is taken out: the list is filtered rather than cleared, because
+# everything else in it is somebody's own shortcut.
+BINDING="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/familiar/"
+MEDIA_KEYS="org.gnome.settings-daemon.plugins.media-keys"
+if command -v gsettings >/dev/null &&
+  gsettings list-schemas 2>/dev/null | grep -qx "$MEDIA_KEYS"; then
+  CURRENT=$(gsettings get "$MEDIA_KEYS" custom-keybindings)
+  if [[ "$CURRENT" == *"$BINDING"* ]]; then
+    say "Removing the voice shortcut"
+    KEPT=$(printf '%s' "$CURRENT" |
+      sed -e "s|'$BINDING', ||g" -e "s|, '$BINDING'||g" -e "s|'$BINDING'||g")
+    gsettings set "$MEDIA_KEYS" custom-keybindings "$KEPT"
+    for key in name binding command; do
+      gsettings reset "$MEDIA_KEYS.custom-keybinding:$BINDING" "$key" 2>/dev/null || true
+    done
+  fi
+fi
+
 if command -v update-desktop-database >/dev/null; then
   update-desktop-database -q "$DATA_DIR/applications" 2>/dev/null || true
 fi

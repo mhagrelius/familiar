@@ -193,6 +193,11 @@ impl Window {
         thread_section.append(Some("Schedule…"), Some("win.schedule-thread"));
 
         let app_section = gio::Menu::new();
+        // The shortcut is how this is meant to be reached, and the shortcut
+        // works with this window closed. The item is here for the first time,
+        // before anybody knows there is a shortcut — and for the times there is
+        // no shortcut, because a desktop that is not GNOME cannot register one.
+        app_section.append(Some("Talk…"), Some("app.voice"));
         app_section.append(Some("Scheduled Chats…"), Some("app.schedules"));
         app_section.append(Some("Preferences"), Some("app.preferences"));
         app_section.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
