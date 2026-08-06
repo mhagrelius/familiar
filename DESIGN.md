@@ -2356,7 +2356,7 @@ next person to change a microphone will need it. Levels are on the curve
 `ui::voice::recorder::level` produces — RMS raised to 0.4 — over 40 ms blocks.
 
 A silent room and seven seconds of ordinary talking, on this desk, through the
-Insta360 with its noise cancelling **off**:
+Insta360 with its AI noise cancelling **on**, which is how it normally runs:
 
 | | silent room | speech |
 |---|---|---|
@@ -2402,18 +2402,34 @@ last 1.5 s was above the gate — at most 200 ms for a silent room, at least 720
 for speech, so `attributable_ms` sits at 400 in a gap nothing lands in. Under the
 same pessimistic assumption it now credits none of them and gives up at 8 s.
 
-Barge-in moved for the same reason: `voice` was 0.18, chosen against a room
-believed to read 0.01 that actually reads 0.124 with peaks to 0.385, so a quarter
-of its silent blocks cleared the floor meant to sit above them. 0.32 is picked
-structurally rather than for comfort — the longest unbroken run of room noise
-above it is 120 ms and `trigger_ms` is 160, so a silent room *cannot* interrupt
-however long it is listened to, while speech reaches the trigger in four blocks.
+**Where the old numbers came from is worth stating, because it is an easy mistake
+to repeat.** The figure the first set was reasoned from — "the microphone reads
+0.01" — is real, but it measures *the assistant's own voice arriving off the
+speakers with the webcam cancelling it*. That is the right number for asking
+whether there is an echo to beat, and it was then used as though it were the
+room. **The room's idle floor had never actually been measured**, and it is
+0.124. One number standing in for another is how a floor of 0.20 came to be
+described as "well over a quiet room" while sitting *under* this one's p90.
+
+Barge-in moved for the same reason: `voice` was 0.18, set against that 0.01, so a
+quarter of the room's silent blocks cleared the floor meant to sit above them.
+0.32 is picked structurally rather than for comfort — the longest unbroken run of
+room noise above it is 120 ms and `trigger_ms` is 160, so a silent room *cannot*
+interrupt however long it is listened to, while ordinary speech reaches the
+trigger in four blocks.
+
+**The one number that argues against 0.32 has not been retaken.** The
+webcam-extension note records a raised voice reaching only 0.30 *while the
+assistant was speaking* — which is precisely the barge case, and just under this
+floor. It is a different measurement from the speech above, taken while the
+webcam was actively ducking, and it means interrupting may need more voice than
+it should. Retake it before defending 0.32: talk over an answer with
+`FAMILIAR_VOICE_LOG=1` and read the level it reports.
 
 **Everything above is one microphone in one room, and that is the honest status
 of it.** The shapes are general — a percentile beats a minimum, a ceiling is set
 by speech's gaps, recency beats a running total — but the constants are this
-desk's. The webcam's noise cancelling moves them by an order of magnitude on its
-own, which is what invalidated the first set.
+desk's, with this webcam, cancelling on.
 
 Two failures here are not about levels at all. **A capture that dies stalls
 everything**: every way out of `Listening` is driven by a block of audio
