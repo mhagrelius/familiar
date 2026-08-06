@@ -1,0 +1,11 @@
+{
+  "uuid": "webcam-mic@hagreli.us",
+  "name": "Webcam Mic",
+  "description": "Switch an Insta360 Link webcam's AI noise cancelling on and off from Quick Settings.\n\nA webcam that removes background noise also removes an assistant talking out of your speakers, and much of anybody talking over it — right in a meeting, wrong when you want to interrupt something. Insta360 ships no Linux control app and ALSA exposes nothing but capture volume, so this drives link-ctl, which speaks to the camera over USB.",
+  "shell-version": [
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/mhagrelius/familiar"
+}
