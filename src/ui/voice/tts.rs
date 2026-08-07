@@ -134,6 +134,18 @@ pub struct Speaker {
     fetching: RefCell<Option<gio::Cancellable>>,
     session: soup::Session,
     speaking: Cell<bool>,
+    /// Set by [`Self::hush`] and cleared by [`Self::allow`]: refuse sentences
+    /// until somebody says this exchange may be spoken again.
+    ///
+    /// **A stop has to be a latch, not a moment.** Clearing the queue only
+    /// silences what is already in it, and the answer is still arriving — every
+    /// delta of a streaming turn queues another sentence. So a stop went quiet
+    /// for a fraction of a second and then carried on reading, which is what
+    /// "cancel and stop do not work" was. Worse after an interruption: the turn
+    /// is abandoned and out of the in-flight slot, so the cancel path can no
+    /// longer find anything to stop, while the dead turn's buffered deltas keep
+    /// feeding this queue.
+    muted: Cell<bool>,
     /// Told whenever it starts or stops making noise, so the overlay can say so.
     on_change: RefCell<Option<OnChange>>,
 }
@@ -153,8 +165,23 @@ impl Speaker {
             fetching: RefCell::new(None),
             session: soup::Session::new(),
             speaking: Cell::new(false),
+            muted: Cell::new(false),
             on_change: RefCell::new(None),
         }
+    }
+
+    /// Allow this exchange to be read out.
+    ///
+    /// Called where a new answer is about to begin, which is the one place that
+    /// knows a stop is over. Every path that stops the reading mutes, and
+    /// nothing un-mutes on its own — so a stop stays stopped however much of
+    /// the old answer is still on its way.
+    pub fn allow(&self) {
+        self.muted.set(false);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.get()
     }
 
     pub fn set_voice(&self, voice: Voice) {
@@ -190,6 +217,13 @@ impl Speaker {
     /// Queue a sentence and start speaking if nothing else is.
     pub fn say(self: &Rc<Self>, sentence: &str) {
         let sentence = sentence.trim();
+        if self.muted.get() {
+            crate::voice_log!(
+                "not saying {:?}: stopped",
+                sentence.chars().take(30).collect::<String>()
+            );
+            return;
+        }
         if sentence.is_empty() || matches!(*self.voice.borrow(), Voice::Silent) {
             crate::voice_log!(
                 "not saying {:?}: voice is {:?}",
@@ -203,11 +237,15 @@ impl Speaker {
         self.pump();
     }
 
-    /// Stop, now, and forget what was queued.
+    /// Stop, now, forget what was queued, and refuse any more of it.
     ///
     /// The dispatcher needs telling twice: killing the client that is waiting
     /// does not stop the server that is speaking, and `-C` is what does.
+    ///
+    /// Stays stopped until [`Self::allow`]. See `muted` for why clearing the
+    /// queue is not enough on its own.
     pub fn hush(&self) {
+        self.muted.set(true);
         self.queue.borrow_mut().clear();
         if let Some(cancellable) = self.fetching.take() {
             cancellable.cancel();
@@ -223,7 +261,13 @@ impl Speaker {
                 gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE,
             );
         }
-        self.announce(false);
+        // Quiet, but *not announced* as quiet. The change handler means "the
+        // answer finished", which is what makes the application start listening
+        // for a follow-up — so announcing a deliberate stop had it open a fresh
+        // exchange on its way out of being cancelled, halfway through the cancel
+        // that was tearing the old one down. Every caller of `hush` sets the
+        // state it wants next itself.
+        self.speaking.set(false);
     }
 
     fn announce(&self, speaking: bool) {
@@ -354,6 +398,36 @@ impl Speaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_stays_stopped() {
+        // Clearing the queue silences what is in it; it does not stop the answer
+        // still arriving. Every delta of a streaming turn queues another
+        // sentence, so a stop went quiet for a fraction of a second and then
+        // carried on reading — and after an interruption the turn is already out
+        // of the in-flight slot, so the cancel path can no longer find anything
+        // to stop while the dead turn's deltas keep arriving.
+        let speaker = Rc::new(Speaker::new());
+        speaker.set_voice(Voice::Desktop);
+        speaker.hush();
+        assert!(speaker.is_muted());
+        speaker.say("the rest of an answer that was cancelled");
+        assert!(
+            !speaker.is_busy(),
+            "a stopped speaker must not take another sentence"
+        );
+    }
+
+    #[test]
+    fn a_new_question_lets_it_speak_again() {
+        // Nothing un-mutes on its own, or the latch would not hold. Asking
+        // something new is the one thing that means the stop is over.
+        let speaker = Rc::new(Speaker::new());
+        speaker.hush();
+        assert!(speaker.is_muted());
+        speaker.allow();
+        assert!(!speaker.is_muted());
+    }
 
     #[test]
     fn the_endpoint_is_asked_for_raw_samples() {

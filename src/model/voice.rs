@@ -366,6 +366,17 @@ pub struct Barge {
     pub trigger_ms: u32,
     /// Learn the background for this long before triggering on anything.
     pub settle_ms: u32,
+    /// Every level seen during the settle window, so the background can be a
+    /// percentile of it rather than its maximum.
+    ///
+    /// **The maximum is the wrong statistic and it made interrupting nearly
+    /// impossible.** One room peak — this desk's silent room reaches 0.385 —
+    /// set the bar at 0.455 for the whole answer, above the 0.343 median of
+    /// ordinary speech, and since the background only ever ratchets *down* it
+    /// never recovered. Reported as having to raise your voice and then waiting
+    /// several seconds to be heard, which is exactly what a threshold you can
+    /// only clear on your loudest syllables feels like.
+    settling: Vec<f64>,
     background: f64,
     over_ms: u32,
     heard_ms: u32,
@@ -396,6 +407,7 @@ impl Default for Barge {
             margin: 0.07,
             trigger_ms: 160,
             settle_ms: 600,
+            settling: Vec::new(),
             background: 0.0,
             over_ms: 0,
             heard_ms: 0,
@@ -424,10 +436,14 @@ impl Barge {
         self.heard_ms = self.heard_ms.saturating_add(span_ms);
 
         if self.heard_ms <= self.settle_ms {
-            // The loudest thing in the settle window is the thing to be heard
-            // over: while it speaks that is its own voice at its peak, and
-            // while it thinks it is the room.
-            self.background = self.background.max(level);
+            // What is *typically* there is the thing to be heard over: while it
+            // speaks that is its own voice off the speakers, and while it thinks
+            // it is the room. The median, because a single peak is not the
+            // background — see `settling`.
+            self.settling.push(level);
+            let mut seen = self.settling.clone();
+            seen.sort_by(|a, b| a.total_cmp(b));
+            self.background = seen[seen.len() / 2];
             return false;
         }
 
@@ -1187,6 +1203,49 @@ mod tests {
             fired |= barge.push(level, BLOCK_MS);
         }
         assert!(fired, "a normal voice has to be able to interrupt");
+    }
+
+    #[test]
+    fn one_peak_in_a_quiet_room_does_not_raise_the_bar() {
+        // The measured failure. A silent room on this desk sits at 0.124 and
+        // peaks at 0.385; taking the *maximum* of the settle window put the bar
+        // at 0.455 — above the 0.343 median of ordinary speech — and because the
+        // background only ratchets down it never came back. Interrupting then
+        // needed a raised voice and several seconds of it.
+        let mut barge = Barge::default();
+        for block in 0..(600 / BLOCK_MS as usize) {
+            barge.push(if block == 3 { 0.385 } else { 0.124 }, BLOCK_MS);
+        }
+        assert!(
+            barge.threshold() <= 0.343,
+            "ordinary speech has to clear the bar, which was {:.3}",
+            barge.threshold()
+        );
+    }
+
+    #[test]
+    fn ordinary_speech_interrupts_a_quiet_room_promptly() {
+        // "Promptly" is the whole complaint: it is no good if it gets there
+        // eventually. Half a second of talking, at the measured median, after a
+        // settle window over a real room.
+        let mut barge = Barge::default();
+        for block in 0..(600 / BLOCK_MS as usize) {
+            barge.push(if block == 3 { 0.385 } else { 0.124 }, BLOCK_MS);
+        }
+        let mut fired_after = None;
+        for block in 0..25 {
+            // Speech, with the gaps it actually has.
+            let level = if block % 3 == 2 { 0.18 } else { 0.343 };
+            if barge.push(level, BLOCK_MS) {
+                fired_after = Some((block + 1) * BLOCK_MS as usize);
+                break;
+            }
+        }
+        let fired_after = fired_after.expect("a normal voice has to interrupt at all");
+        assert!(
+            fired_after <= 500,
+            "took {fired_after} ms to notice somebody talking"
+        );
     }
 
     #[test]

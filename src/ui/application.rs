@@ -2762,12 +2762,12 @@ impl Application {
                 self.abandon();
                 self.go_idle();
             }
-            // Interrupting. The answer stays on screen and in the chat; what
-            // stops is the reading of it.
-            State::Speaking => {
-                self.speaker().hush();
-                self.start_listening();
-            }
+            // Interrupting, by hand instead of by talking over it. The same
+            // gesture, so the same path: hushing and listening was not enough on
+            // its own, because the turn went on streaming and every delta queued
+            // another sentence — the button went quiet for a moment and then the
+            // answer carried on.
+            State::Speaking => self.interrupted(),
         }
     }
 
@@ -3395,6 +3395,20 @@ impl Application {
             talk.waiting_ms = 0;
         }
         window.reset();
+        // Talking over it arrives *through* an open microphone, so there is one
+        // to carry on with. A press of Stop does not, and setting the window to
+        // Listening with nothing capturing would leave it listening at a level of
+        // zero for ever — nothing advances the state but a block of audio.
+        let open = self
+            .imp()
+            .talk
+            .borrow()
+            .as_ref()
+            .is_some_and(|talk| talk.recorder.is_some());
+        if !open {
+            self.start_listening();
+            return;
+        }
         window.set_state(State::Listening);
         self.speech().reset();
     }
@@ -3641,6 +3655,12 @@ impl Application {
         }
         window.set_state(State::Thinking);
 
+        // This answer may be read out. Every path that stops the reading mutes
+        // the speaker and nothing un-mutes on its own, so a new question is the
+        // one place that lifts it — which is what keeps a stop stopped while the
+        // last answer is still arriving.
+        self.speaker().allow();
+
         crate::voice_log!("asking: {question:?}");
         self.imp().in_flight.replace(Some(InFlight {
             question: question.to_string(),
@@ -3763,6 +3783,7 @@ impl Application {
             // which is what decides whether the microphone is watched for an
             // interruption or read as a question.
             window.set_state(State::Speaking);
+            self.resettle_barge();
             crate::voice_log!("speaking the answer");
             return;
         }
@@ -3781,7 +3802,13 @@ impl Application {
             return;
         };
         match (speaking, window.state()) {
-            (true, State::Thinking | State::Speaking) => window.set_state(State::Speaking),
+            (true, State::Thinking | State::Speaking) => {
+                let starting = window.state() != State::Speaking;
+                window.set_state(State::Speaking);
+                if starting {
+                    self.resettle_barge();
+                }
+            }
             (false, State::Speaking) => {
                 // Only when there is nothing left to say. The speaker falls
                 // quiet between two sentences, and going back to listening
@@ -3797,6 +3824,24 @@ impl Application {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Learn the background again, now that what it is hearing has changed.
+    ///
+    /// `Barge` measures what is already there during a settle window and then
+    /// only ever revises it *down*. That is right within one phase and wrong
+    /// across two: the window it settled in was the room while the model was
+    /// thinking, and what arrives next is the assistant's own voice off the
+    /// speakers. Without this the bar stayed where a quiet room put it — and on
+    /// this desk a silent room peaks at 0.385, so it stayed above the median of
+    /// ordinary speech and interrupting took a raised voice and several seconds.
+    ///
+    /// The cost is that the first `settle_ms` of an answer cannot be interrupted,
+    /// which is not much of a cost: there is nothing to interrupt yet.
+    fn resettle_barge(&self) {
+        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
+            talk.barge = crate::model::voice::Barge::default();
         }
     }
 
