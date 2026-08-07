@@ -522,19 +522,26 @@ fn web() -> Vec<Scenario> {
                     words: 5,
                 },
                 NeverCalls("news"),
-                // Three, which is what `web::Budget` allows — a ceiling below
-                // the application's own is the suite inventing a stricter rule
-                // than the product has. Two was that, and it failed a run that
-                // searched once and fetched the top result, which is fine.
+                // Three, which is `Budget::SEARCHES_BEFORE_PRESSURE` — the
+                // point the product itself says a turn should be done by. Two
+                // was here once and was the suite inventing a stricter rule
+                // than the product has: it failed a run that searched once and
+                // fetched the top result, which is fine.
                 //
-                // It still fails, and that is the finding rather than a number
-                // to tune: handed three good pages that explain the mechanism,
-                // the model goes looking for source-level detail — "token
-                // hashing", "cache slots", "site:github.com ggml" — four and
-                // five queries deep, past the budget, into calls that get
-                // refused. The ceiling now names the real rule, so a failure
-                // here is a failure to stop rather than a failure to match an
-                // arbitrary count.
+                // It names the *soft* line deliberately, and the hard ceiling
+                // of six would be the wrong number here. This is a question one
+                // good search answers, so the check is "did it stop when it had
+                // enough", not "did it stay inside the wall" — six would pass a
+                // model that swept the topic and then answered.
+                //
+                // It fails, and that is the finding rather than a number to
+                // tune: handed three good pages that explain the mechanism, the
+                // model goes looking for source-level detail — "token hashing",
+                // "cache slots", "site:github.com ggml" — four and five queries
+                // deep. Those used to come back refused; now they run, and what
+                // has to stop them is the count and the named-fact condition
+                // the third result carries. Whether that is enough is the thing
+                // this scenario now measures.
                 AtMostCalls(3),
                 NoRepeatOf("web_search"),
                 Answers,
@@ -814,8 +821,15 @@ fn staleness() -> Vec<Scenario> {
                 // `gh release list` to find a project's current version is
                 // what a person would do, and encoding a first reaction as a
                 // rule would have made the suite enforce a worse assistant.
-                // Three searches, one escalation and a reply is six calls.
-                AtMostCalls(6),
+                //
+                // Nine: the budget's six searches, one escalation, one `gh` and
+                // a reply. It was six back when three was all a turn could
+                // spend, and leaving it there would have failed a model that
+                // used the searches it is now allowed and then did exactly what
+                // this scenario rewards. The property is that it says which
+                // part it could not confirm — the ceiling is only there to
+                // catch a turn that never got to saying anything.
+                AtMostCalls(9),
                 NoRepeatOf("gh"),
                 NoRepeatOf("web_search"),
                 // Every way a model actually writes this. The first version

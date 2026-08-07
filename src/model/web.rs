@@ -39,8 +39,10 @@ text in them, so after one good search you almost always have what you need. \
 Write the reply from it.
 
 Only search again if you can name the specific fact you are still missing, and \
-say what it is before you do. Three searches in a turn is the hard ceiling, and \
-you will rarely want the third. Do not plan a sweep of the topic and do not \
+say what it is before you do. Three searches answers nearly anything and you \
+will rarely want the third; six in a turn is the hard ceiling. Past the third \
+you will be told how many are left, and a lookup you cannot justify by naming \
+the gap is one you do not need. Do not plan a sweep of the topic and do not \
 fire several searches at once — you cannot read results you have not received, \
 and a turn that ends in a pile of searches and no answer has failed the user \
 however thorough it looked.
@@ -84,37 +86,91 @@ can open it.";
 
 /// What a turn is allowed to spend on looking things up.
 ///
-/// The prompt says three searches is the ceiling, and the prompt is not what
-/// holds it. Four wordings of that sentence were measured — plain prose, a
-/// numeric ceiling, a procedural *search once then answer* at the head of the
-/// note, and the same rule copied into the tool description — and against an
-/// open-ended question the model ran twelve to seventeen searches and ended the
-/// turn with nothing written, every time. That is the published result too:
-/// telling a model its budget does not make it keep one, because it cannot
-/// count what it has spent.
+/// The guidance says how many searches a turn should want, and the guidance is
+/// not what holds it. Four wordings of that sentence were measured — plain
+/// prose, a numeric ceiling, a procedural *search once then answer* at the head
+/// of the note, and the same rule copied into the tool description — and against
+/// an open-ended question the model ran twelve to seventeen searches and ended
+/// the turn with nothing written, every time. That is the published result too:
+/// telling a model its budget does not make it keep one, because it cannot count
+/// what it has spent.
 ///
-/// So the count lives out here, where it is arithmetic. When it runs out the
-/// tool does not run: the call comes back having spent nothing, saying the
-/// budget is gone and the answer is now due. The model reads that in the same
-/// position it reads a result, which is the one place guidance has been shown to
-/// work in this app.
+/// So the count lives out here, where it is arithmetic, and it is two numbers
+/// rather than one. [`SEARCHES_BEFORE_PRESSURE`](Budget::SEARCHES_BEFORE_PRESSURE)
+/// is where the turn starts being told what it has left and asked to name the
+/// fact it is still missing; [`SEARCHES_PER_TURN`](Budget::SEARCHES_PER_TURN) is
+/// where the tool stops running. A single hard number at the soft line is what
+/// this used to be, and it cut an exploratory question off mid-hunt — three is
+/// the right answer to "how many does a question need", and the wrong answer to
+/// "how many may a question have".
 ///
-/// This is the rule, not the enforcement — [`Budget::refuse`] is a string and
-/// [`Budget::SEARCHES_PER_TURN`] is a number, so the application and the eval
-/// harness can hold the same line without either owning it.
+/// Both land in the same position: the text of a tool result, which is the one
+/// place guidance has been shown to work in this app. Under the soft line a
+/// result says nothing about the budget at all — a turn that will finish in one
+/// search should never have to read about a limit it is nowhere near.
+///
+/// This is the rule, not the enforcement — [`Budget::refuse`] and
+/// [`Budget::pressure`] are strings and the two constants are numbers, so the
+/// application and the eval harness can hold the same line without either owning
+/// it.
 pub struct Budget;
 
 impl Budget {
-    /// Searches — `web_search` and `news` together — one turn may run.
+    /// Searches — `web_search` and `news` together — one turn may run at all.
+    ///
+    /// Six. Nearly every question is answered by the first, and the guidance
+    /// says so; this is not the number a turn should want but the number past
+    /// which it is certainly not searching any more. It was three, which is the
+    /// same as the soft line below, and a research-heavy question spent them on
+    /// its opening survey and had nothing left for the page it actually wanted.
+    pub const SEARCHES_PER_TURN: usize = 6;
+
+    /// Where a search result starts saying what the turn has left.
     ///
     /// Three, matching what the guidance says out loud, so the model is never
-    /// refused something it was told it could have. Nearly every question is
-    /// answered by the first; the third exists for the genuine second angle.
-    pub const SEARCHES_PER_TURN: usize = 3;
+    /// surprised by the first note. Past here every result carries
+    /// [`pressure`](Budget::pressure): the count, and the standing condition
+    /// that a further lookup wants a named missing fact. That is the same rule
+    /// the guidance states, arriving at the moment the decision is made rather
+    /// than thousands of tokens earlier.
+    pub const SEARCHES_BEFORE_PRESSURE: usize = 3;
 
     /// Whether a search may run, given how many have already gone out this turn.
     pub fn allows(spent: usize) -> bool {
         spent < Self::SEARCHES_PER_TURN
+    }
+
+    /// What a search result carries once the turn is at or past the soft line,
+    /// given the count *including* the search that just ran.
+    ///
+    /// `None` under the soft line, which is the ordinary case and has to stay
+    /// silent: a note about the budget on the first result teaches a model that
+    /// searching is rationed when the honest answer is that it is not.
+    ///
+    /// Phrased as a condition rather than a warning. "Name the fact you are
+    /// missing" is a test the model can apply and fail honestly; "try not to
+    /// search too much" is not, and the four measured prompt wordings were all
+    /// versions of the latter.
+    pub fn pressure(spent: usize) -> Option<String> {
+        if spent < Self::SEARCHES_BEFORE_PRESSURE {
+            return None;
+        }
+        let total = Self::SEARCHES_PER_TURN;
+        let left = total.saturating_sub(spent);
+        Some(if left == 0 {
+            format!(
+                "\nThat was lookup {spent} of {total}, and there are none left. \
+                 Write the user's answer now from what is above.\n"
+            )
+        } else {
+            format!(
+                "\nThat was lookup {spent} of {total}, so {left} remain — and from \
+                 here they are for a fact you can name. Before looking anything up \
+                 again, say which specific thing you are still missing and why the \
+                 pages above do not have it. If you cannot name one, you already \
+                 have what you need: write the user's answer.\n"
+            )
+        })
     }
 
     /// What comes back instead of results when the budget is gone.
@@ -122,7 +178,7 @@ impl Budget {
     /// Phrased as a finished state rather than a failure. The decline note in
     /// the system prompt teaches the model to read a refusal as an answer and
     /// carry on, and this has to land the same way — a turn that ends here has
-    /// three searches of material in it and is not short of anything except a
+    /// six searches of material in it and is not short of anything except a
     /// reply.
     pub fn refuse(spent: usize) -> String {
         format!(
@@ -137,6 +193,62 @@ impl Budget {
              a ninth lookup is not."
         )
     }
+}
+
+/// Whether a URL is one the user put in front of the model, rather than one the
+/// model found, remembered or invented.
+///
+/// The budget sweeps `fetch_url` up once the searches are spent, because at that
+/// point a fetch is usually the same hunt by another route. It is not that when
+/// the user named the page: a question about a specific site, asked in the same
+/// breath as anything that takes a few searches to settle, ends with the one
+/// call the user actually wanted being the one refused. That happened.
+///
+/// The host is what is compared, not the whole URL — the user names a site and
+/// the model fetches a page under it, and requiring an exact match would exempt
+/// almost nothing. Only text the *user* wrote counts: a URL that arrived in a
+/// search result is not one the user named, and telling those two apart is the
+/// entire job here.
+/// The same question asked of a `fetch_url` call's JSON arguments.
+///
+/// Here rather than at each call site because there are two of them — the
+/// application and the eval harness — and a harness that read the argument
+/// slightly differently would score a rule the product does not have. Arguments
+/// that will not parse are not a page the user named.
+pub fn fetches_a_named_page(arguments: &str, said: &[String]) -> bool {
+    let url = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| value.get("url")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    named_by_user(&url, said)
+}
+
+pub fn named_by_user(url: &str, said: &[String]) -> bool {
+    let Some(host) = host_of(url) else {
+        return false;
+    };
+    said.iter().any(|text| text.to_lowercase().contains(&host))
+}
+
+/// The host of a URL, lowercased and without `www.`.
+///
+/// Hand-rolled rather than a URL crate: this is a substring test against what
+/// somebody typed, not a parse, and a `None` here only costs an exemption.
+/// A host with no dot in it is rejected, so a malformed argument cannot produce
+/// a fragment that matches every message.
+fn host_of(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .trim()
+        .trim_start_matches("www.")
+        .to_lowercase();
+    (host.contains('.') && !host.starts_with('.') && !host.ends_with('.')).then_some(host)
 }
 
 /// A search, as Exa wants it.
@@ -328,19 +440,105 @@ mod tests {
 
     #[test]
     fn a_turn_gets_the_number_of_searches_the_guidance_promises_it() {
-        // If these two ever disagree the model is refused something it was
-        // told it could have, which reads as a broken tool rather than a
-        // budget — and a model that thinks the tool is broken keeps trying.
+        // If these ever disagree the model is refused something it was told it
+        // could have, which reads as a broken tool rather than a budget — and a
+        // model that thinks the tool is broken keeps trying.
         assert!(
-            SEARCH_GUIDANCE.contains("Three searches in a turn is the hard ceiling"),
+            SEARCH_GUIDANCE.contains("six in a turn is the hard ceiling"),
             "the guidance no longer says what the budget enforces"
         );
-        assert_eq!(Budget::SEARCHES_PER_TURN, 3);
+        assert!(
+            SEARCH_GUIDANCE.contains("Three searches answers nearly anything"),
+            "the guidance no longer says where the pressure starts"
+        );
+        assert_eq!(Budget::SEARCHES_PER_TURN, 6);
+        assert_eq!(Budget::SEARCHES_BEFORE_PRESSURE, 3);
+        const {
+            assert!(
+                Budget::SEARCHES_BEFORE_PRESSURE < Budget::SEARCHES_PER_TURN,
+                "a soft line at or above the hard one is one line, not two"
+            );
+        }
 
         assert!(Budget::allows(0));
-        assert!(Budget::allows(2));
-        assert!(!Budget::allows(3));
+        assert!(Budget::allows(5));
+        assert!(!Budget::allows(6));
         assert!(!Budget::allows(9));
+    }
+
+    #[test]
+    fn a_search_under_the_soft_line_is_never_told_about_the_budget() {
+        // The ordinary turn, and most of them. A note about rationing on the
+        // first result teaches a model that searching is scarce when it is not,
+        // and the measured failure of the old ceiling was in that direction.
+        assert_eq!(Budget::pressure(0), None);
+        assert_eq!(Budget::pressure(1), None);
+        assert_eq!(Budget::pressure(2), None);
+    }
+
+    #[test]
+    fn past_the_soft_line_a_result_says_what_is_left_and_what_it_is_for() {
+        let third = Budget::pressure(3).expect("the third search carries the note");
+        assert!(third.contains('3'), "{third}");
+        assert!(third.contains('6'), "{third}");
+        // The condition is the point: a test the model can apply, not a mood.
+        assert!(third.contains("name"), "{third}");
+
+        let last = Budget::pressure(6).expect("the last search carries a note too");
+        assert!(last.contains("none left"), "{last}");
+        assert!(last.contains("Write the user's answer now"), "{last}");
+
+        // And none of it may read as a failure, for the same reason the refusal
+        // may not: a result the model reads as broken is one it retries.
+        for note in [third, last] {
+            for panic_word in ["Error", "failed", "unavailable", "try again"] {
+                assert!(
+                    !note.contains(panic_word),
+                    "the pressure note reads as {panic_word:?}, which invites a retry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_page_the_user_named_is_told_apart_from_one_the_model_found() {
+        let said = vec![
+            "why couldn't you pull details from onlyfarms.gg?".to_string(),
+            "look at https://www.example.org/docs too".to_string(),
+        ];
+
+        // The measured case: a bare host in the question, a full URL in the call.
+        assert!(named_by_user(
+            "https://onlyfarms.gg/night-best-healers/",
+            &said
+        ));
+        // `www.` on either side is the same site.
+        assert!(named_by_user("https://example.org/docs/intro", &said));
+        // A port and a scheme-less URL are still the host.
+        assert!(named_by_user("onlyfarms.gg:8443/x", &said));
+
+        // What the sweep exists for: somewhere the user never mentioned.
+        assert!(!named_by_user(
+            "https://github.com/ggml-org/llama.cpp",
+            &said
+        ));
+        // Nothing to compare is not an exemption.
+        assert!(!named_by_user("https://onlyfarms.gg/x", &[]));
+        assert!(!named_by_user("not a url at all", &said));
+
+        // And through the call's arguments, which is how both callers ask.
+        assert!(fetches_a_named_page(
+            r#"{"url":"https://onlyfarms.gg/night-best-healers/"}"#,
+            &said
+        ));
+        assert!(!fetches_a_named_page(
+            r#"{"url":"https://elsewhere.test/x"}"#,
+            &said
+        ));
+        // Arguments that will not parse, or carry no URL at all, are not an
+        // exemption — a call nobody can read is not a page the user named.
+        assert!(!fetches_a_named_page(r#"{"url":"#, &said));
+        assert!(!fetches_a_named_page(r#"{"path":"onlyfarms.gg"}"#, &said));
     }
 
     #[test]

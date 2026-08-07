@@ -19,7 +19,7 @@ use crate::model::instructions::{date_line, Prompt, DEFAULT_PERSONA};
 use crate::model::memory::{self, dream, harvest, Memory};
 use crate::model::project::{Project, Store, ThreadSummary, DEFAULT_PROJECT};
 use crate::model::settings::{Config, Settings};
-use crate::model::thread::{StoredTurn, Thread, ThreadId};
+use crate::model::thread::{Entry, StoredTurn, Thread, ThreadId};
 use crate::model::tools;
 use crate::model::turn::{Event, ToolCall, ToolOutcome, TurnState, TurnStream};
 /// The spoken half's pure logic. Aliased because `ui::voice` is its other half
@@ -97,9 +97,8 @@ use crate::model::turn::{LAST_ROUND, WRAP_UP, WRAP_UP_AFTER};
 /// `fetch_url` is not one of them *while the budget still has room* — it reads
 /// a page the user named, which is a different act from searching for one, and
 /// the guidance already tells the model not to fetch what a search returned.
-/// Once the searches are gone it is counted, because at that point it has
-/// stopped being "read this page" and become "find me that fact by another
-/// route": see [`is_a_lookup`].
+/// Once the searches are gone it is counted unless the user named the site: see
+/// [`is_a_lookup`].
 fn is_a_search(tool: &str) -> bool {
     matches!(tool, "web_search" | "news")
 }
@@ -113,10 +112,18 @@ fn is_a_search(tool: &str) -> bool {
 ///
 /// `gh` is not in here and must not be: it acts on repositories, and a turn that
 /// is genuinely doing GitHub work would be crippled by a budget meant for the
-/// web. `fetch_url` is, but only once the searches are spent — before that it is
-/// the ordinary "read this page" it has always been.
-fn is_a_lookup(tool: &str) -> bool {
-    is_a_search(tool) || tool == "fetch_url"
+/// web. `fetch_url` is, but only for a page the user did not name. The measured
+/// failure in *that* direction: a question that mentioned a site by name, asked
+/// alongside enough to spend the searches, ended with the fetch of that named
+/// page as the one call refused — the assistant said so itself when asked why.
+/// A URL the user typed is not a route around the budget, and
+/// [`web::named_by_user`](crate::model::web::named_by_user) is what tells the
+/// two apart.
+fn is_a_lookup(call: &ToolCall, said: &[String]) -> bool {
+    if is_a_search(&call.name) {
+        return true;
+    }
+    call.name == "fetch_url" && !crate::model::web::fetches_a_named_page(&call.arguments, said)
 }
 
 /// Whether a settled call was the budget refusing rather than a search.
@@ -4277,17 +4284,18 @@ impl Application {
         // rounds and a per-round limit would not see it.
         //
         // `is_a_lookup` is wider than `is_a_search` on purpose. Only searches
-        // *spend* the budget, but once it is gone a `fetch_url` is the same
-        // hunt by another route, and refusing it is what turns "that tool is
-        // closed" into "looking things up is over".
-        if is_a_lookup(&call.name) {
-            let spent = self.searches_this_turn(&ran);
-            if !Budget::allows(spent) {
-                call.outcome = Some(ToolOutcome::Ok(Budget::refuse(spent)));
-                ran.push(call);
-                self.run_next(pending, ran, state);
-                return;
-            }
+        // *spend* the budget, but once it is gone a `fetch_url` after a page
+        // nobody asked for is the same hunt by another route, and refusing it is
+        // what turns "that tool is closed" into "looking things up is over".
+        // The budget first: it is arithmetic over calls already made, where
+        // `is_a_lookup` reads the whole conversation back to decide whether the
+        // user named this page. Nothing needs asking while there is room.
+        let spent = self.searches_this_turn(&ran);
+        if !Budget::allows(spent) && is_a_lookup(&call, &self.asked_by_user()) {
+            call.outcome = Some(ToolOutcome::Ok(Budget::refuse(spent)));
+            ran.push(call);
+            self.run_next(pending, ran, state);
+            return;
         }
 
         let runner = Runner::new(
@@ -4332,14 +4340,59 @@ impl Application {
         self.draw_chips(&ran, std::slice::from_ref(&call));
 
         let app = self.clone();
+        let searched = is_a_search(&call.name);
         runner.run(&call.clone(), move |outcome| {
             // Cleared before the next call is drawn, or a fast tool behind a
             // slow one would inherit the transcript's last percentage.
             app.imp().progress.replace(None);
+            // Past the soft line, every search result ends by saying what the
+            // turn has left. It goes on here rather than inside the tool
+            // because this is where the arithmetic is — and it goes last,
+            // after the result's own closing line, because being the final
+            // thing in the context at the moment of the next decision is the
+            // whole reason it works.
+            let outcome = match (searched, outcome) {
+                (true, ToolOutcome::Ok(text)) => {
+                    ToolOutcome::Ok(match Budget::pressure(spent + 1) {
+                        Some(note) => text + &note,
+                        None => text,
+                    })
+                }
+                (_, outcome) => outcome,
+            };
             call.outcome = Some(outcome);
             ran.push(call);
             app.run_next(pending, ran, state);
         });
+    }
+
+    /// Everything the user has typed in this conversation, for [`is_a_lookup`].
+    ///
+    /// User text only, and that is the point: a URL that came back in a search
+    /// result is not a page the user named, so tool results and answers are not
+    /// in here. The whole chat rather than just this question, because "pull the
+    /// details from that site" three turns later is still the user having named
+    /// it.
+    fn asked_by_user(&self) -> Vec<String> {
+        let in_flight = self.imp().in_flight.borrow();
+        let Some(turn) = in_flight.as_ref() else {
+            return Vec::new();
+        };
+        let mut said = vec![turn.question.clone()];
+        let mut earlier = |thread: &Thread| {
+            said.extend(thread.entries.iter().filter_map(|entry| match entry {
+                Entry::Turn(turn) => Some(turn.user.clone()),
+                Entry::Note(_) => None,
+            }));
+        };
+        match &turn.session.chat {
+            // The open chat's state lives in the application's slot, where a
+            // background run's does not: the same split every other reader of a
+            // running turn makes.
+            Chat::Open => earlier(&self.imp().thread.borrow()),
+            Chat::Background(thread) => earlier(thread),
+        }
+        said
     }
 
     /// How many searches this turn has run: the rounds already settled, plus

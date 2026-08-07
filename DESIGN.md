@@ -1912,10 +1912,39 @@ getting seventeen searches and no answer.
 **The count had to leave the prompt entirely.** Even with the closing line, three
 scenarios kept spiralling, and the last of the wording ideas — a numeric ceiling
 stated four different ways — had by then all been measured and all lost. The rule
-now lives in [`web::Budget`]: three searches a turn, counted in code, and the
-fourth call comes back without going out, saying the budget is spent and the
-answer is due. That is the published result as well as the measured one — a model
-cannot keep a budget it cannot count, which is why stating one never worked.
+now lives in [`web::Budget`], counted in code: a call past the ceiling comes back
+without going out, saying the budget is spent and the answer is due. That is the
+published result as well as the measured one — a model cannot keep a budget it
+cannot count, which is why stating one never worked.
+
+**It is two numbers, not one, since 2026-08-06.** The ceiling was three, which is
+the right answer to *how many searches does a question need* and the wrong answer
+to *how many may a question have*. A research-heavy ask spent three on its
+opening survey; the `fetch_url` for the one page the user had named by name was
+queued behind them and refused, and the assistant — asked afterwards why — read
+its own budget back correctly and said it should have fetched first. Three is now
+`SEARCHES_BEFORE_PRESSURE` and six is `SEARCHES_PER_TURN`. Under three a result
+says nothing about the budget at all, because a turn finishing in one search must
+not learn that searching is rationed. From the third onward every result ends
+with the count and one condition — *name the fact you are still missing, or you
+are done* — which is a test the model can apply and fail honestly, where the four
+lost prompt wordings were all versions of "try not to search too much". The hard
+refusal is unchanged at the wall.
+
+The `fetch_url` sweep is narrower for the same reason. It exists because a model
+whose searches are spent will go after the same fact with a URL it invented, and
+that is still refused; a page whose *host the user typed* is not that, and runs
+whatever the budget says (`web::named_by_user`). Only user-authored text counts —
+a URL that arrived in a search result is not a page the user named, and telling
+those two apart is the whole job.
+
+What this costs is now what the `web` family measures. The scenarios that cap
+calls at three — `semantic-query`, `version-is-not-remembered`,
+`cutoff-is-not-an-answer`, `premise-gets-checked`, `a-number-that-moves` — name
+the *soft* line on purpose, and they used to be half-enforced by the refusal:
+a fourth search came back empty-handed whatever the model intended. Now it runs.
+Those checks are unchanged and unprotected, which makes them the honest question:
+does a counted, conditional note hold a model that a hard wall used to hold?
 
 It is worth being precise about what that bought, because the headline number
 undersells it. The score moved 91% → 93%. But *ran out of rounds* went 11 → 0 and

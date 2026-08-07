@@ -70,10 +70,15 @@ fn is_a_search(tool: &str) -> bool {
 }
 
 /// The tools the budget *refuses* once it is spent, matching `ui::application`.
-/// Wider than the above: a `fetch_url` after three searches is the same hunt by
-/// another route, and letting it through is how a turn reaches eight lookups.
-fn is_a_lookup(tool: &str) -> bool {
-    is_a_search(tool) || tool == "fetch_url"
+/// Wider than the above: a `fetch_url` after the searches are gone is the same
+/// hunt by another route, and letting it through is how a turn reaches eight
+/// lookups — unless the user named the site, which the application exempts and
+/// so must this, or the harness scores a rule the product does not have.
+fn is_a_lookup(call: &familiar::model::turn::ToolCall, said: &[String]) -> bool {
+    if is_a_search(&call.name) {
+        return true;
+    }
+    call.name == "fetch_url" && !familiar::model::web::fetches_a_named_page(&call.arguments, said)
 }
 
 /// How long to wait before retrying, in seconds. Long enough for systemd to
@@ -849,7 +854,15 @@ fn record_calls(
     job: &mut Job,
     calls: &[familiar::model::turn::ToolCall],
 ) -> Vec<Message> {
-    let stubs = &harness.scenarios[job.scenario].stubs;
+    let scenario = &harness.scenarios[job.scenario];
+    let stubs = &scenario.stubs;
+    // What the user has typed by this point in the conversation, which is what
+    // exempts a `fetch_url` from the budget. Taken once, before the loop, so it
+    // is not held across the borrow of `job.seen` below.
+    let said: Vec<String> = scenario.asks[..=job.step]
+        .iter()
+        .map(|ask| ask.user.to_string())
+        .collect();
     let mut results = Vec::new();
     for call in calls {
         let nth = job.seen.entry(call.name.clone()).or_insert(0);
@@ -872,12 +885,24 @@ fn record_calls(
             // stayed the same would measure a model reaching for tools it had
             // been told it had and did not.
             switch_on(job, &call.arguments, &harness.persona)
-        } else if is_a_lookup(&call.name) && !Budget::allows(job.searches) {
+        } else if is_a_lookup(call, &said) && !Budget::allows(job.searches) {
             Reply::ok(Budget::refuse(job.searches))
-        } else {
-            if is_a_search(&call.name) {
-                job.searches += 1;
+        } else if is_a_search(&call.name) {
+            job.searches += 1;
+            *nth += 1;
+            // Past the soft line the application appends the count and the
+            // condition to the result, so the harness does too: a scenario
+            // graded without it is graded on a shorter leash than the product
+            // gives, and the whole question the budget answers is what the
+            // model does when it is told what it has left.
+            match (
+                stubs.reply(&call.name, &call.arguments, *nth - 1),
+                Budget::pressure(job.searches),
+            ) {
+                (Reply::Ok(text), Some(note)) => Reply::ok(text + &note),
+                (reply, _) => reply,
             }
+        } else {
             *nth += 1;
             stubs.reply(&call.name, &call.arguments, *nth - 1)
         };
