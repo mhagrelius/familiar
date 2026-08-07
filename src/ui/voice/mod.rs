@@ -19,14 +19,20 @@
 //! instructions, and everything downstream — folding, the passive reader, the
 //! sidebar — happens to it without knowing where the words came from.
 //!
-//! **The microphone stays open for the whole exchange** — while it
-//! transcribes, while it thinks, while it speaks — because an assistant you
-//! have to wait for is a walkie-talkie. `model::voice::Barge` is what watches
-//! it during those states, and it works without echo cancellation by learning
-//! what it is already hearing and triggering on a margin above that: the room
-//! while it thinks, its own voice off the speakers while it talks. On
-//! headphones that makes it very sensitive; on loud speakers it means talking
-//! over your own assistant, which is what interrupting anybody sounds like.
+//! **The microphone stays open for the whole exchange**, but what it hears is
+//! only a question while the window is listening. Everything else is discarded
+//! as it arrives — see `Application::heard_block`. It stays open because the
+//! watchdogs that get the window out of a stuck state count in blocks of audio
+//! rather than needing timers of their own.
+//!
+//! **Interrupting is the shortcut or the Stop button, and nothing else.** There
+//! was a `Barge` that watched the microphone while it spoke; it was removed once
+//! measured. The assistant's own voice off the speakers reaches this desk's
+//! microphone at a peak of 0.577 against 0.578 for the person in front of it, so
+//! no threshold separates them — a settle window that caught a quiet moment made
+//! it interrupt itself, and one that caught a burst made it uninterruptible. Both
+//! happened. On headphones the level approach would work; a feature that depends
+//! on which output device is plugged in is not one worth keeping.
 //!
 //! The microphone closes when the exchange does, so the panel's indicator is
 //! on for a conversation rather than for a session.
@@ -42,7 +48,7 @@ pub use speech::Speech;
 pub use tts::{Speaker, Voice};
 pub use window::VoiceWindow;
 
-use crate::model::voice::{Barge, Endpointer, Reading, Recent, Spoken};
+use crate::model::voice::{Endpointer, Reading, Recent, Spoken};
 
 /// Trace what the microphone is doing, when `FAMILIAR_VOICE_LOG` is set.
 ///
@@ -99,9 +105,6 @@ pub struct Talk {
     /// And what ends it when one is not: loudness dropping. Also what draws
     /// the meter, either way.
     pub endpointer: Endpointer,
-    /// Watches for somebody talking over it, while it thinks and while it
-    /// speaks. Reset whenever what it would be hearing changes.
-    pub barge: Barge,
     /// Samples not yet handed to the live model, kept until there is a whole
     /// chunk of them: the streaming encoder takes one size and nothing else.
     pub pending: Vec<f32>,
@@ -138,7 +141,6 @@ impl Talk {
             recorder: None,
             spoken: Spoken::default(),
             endpointer: Endpointer::default(),
-            barge: Barge::default(),
             pending: Vec::new(),
             live: String::new(),
             answer: String::new(),
@@ -158,7 +160,6 @@ impl Talk {
         self.recorder = None;
         self.spoken = Spoken::default();
         self.endpointer = Endpointer::default();
-        self.barge = Barge::default();
         self.pending.clear();
         self.live.clear();
         self.answer.clear();

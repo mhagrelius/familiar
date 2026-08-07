@@ -3025,7 +3025,6 @@ impl Application {
                 }
                 talk.spoken = crate::model::voice::Spoken::default();
                 talk.endpointer = crate::model::voice::Endpointer::default();
-                talk.barge = crate::model::voice::Barge::default();
                 talk.pending.clear();
                 talk.live.clear();
                 talk.answer.clear();
@@ -3161,9 +3160,18 @@ impl Application {
     /// One block of audio, forty milliseconds of it.
     ///
     /// The microphone is open for the whole exchange, so what a block means
-    /// depends on what is happening: while listening it is the question, and
-    /// while thinking or speaking it is only ever watched for somebody
-    /// starting to talk over the top.
+    /// depends on what is happening. While listening it is the question. While
+    /// anything else is happening it is **thrown away**, and the reason is
+    /// measured: the assistant's own voice off the speakers reaches this desk's
+    /// microphone at a peak of 0.577, against 0.578 for the person in front of
+    /// it. Nothing about a level tells those apart, so audio arriving while it
+    /// talks is not evidence of anything and is not kept — otherwise the tail of
+    /// an answer ends up in the transcript of the next question, which is what
+    /// happened.
+    ///
+    /// Blocks still arrive in every state, and two things depend on that: the
+    /// watchdogs below count in blocks rather than needing a timer, and the
+    /// buffer is drained here rather than only at the start of the next listen.
     fn heard_block(&self, block: &[f32]) {
         let level = voice::recorder::level(block);
         // How much audio this actually is, rather than how much was asked for.
@@ -3185,12 +3193,23 @@ impl Application {
                 }
             }
         }
-        match self.voice_state() {
+        let state = self.voice_state();
+        if state != State::Listening {
+            // Drop it as it arrives. Waiting until the next listen to clear the
+            // buffer leaves whatever was captured during the answer sitting in
+            // it, and half a second of the assistant's own voice is enough to
+            // satisfy every test for somebody having spoken.
+            if let Some(talk) = self.imp().talk.borrow().as_ref() {
+                if let Some(recorder) = talk.recorder.as_ref() {
+                    let _ = recorder.take();
+                }
+            }
+        }
+        match state {
             State::Listening => self.heard_while_listening(block, level, span_ms),
             // Not while transcribing. That quarter-second sits directly after
             // somebody stopped talking, which is exactly where their own
-            // trailing breath is, and interrupting a pass that has not
-            // produced a question yet gains nothing but loses the question.
+            // trailing breath is.
             State::Transcribing => self.still_waiting(TRANSCRIBE_PATIENCE, span_ms),
             State::Thinking => {
                 // Nothing is running, and nothing is going to take this out of
@@ -3205,20 +3224,12 @@ impl Application {
                     return;
                 }
                 self.still_waiting(THINK_PATIENCE, span_ms);
-                if self.listen_for_interruption(level, span_ms, "thinking") {
-                    self.interrupted();
-                }
             }
-            State::Speaking => {
-                // The same backstop as thinking: nothing but the speaker
-                // falling silent takes the window out of this state, and a
-                // missed announcement would strand it with the microphone
-                // open and no way back.
-                self.still_waiting(THINK_PATIENCE, span_ms);
-                if self.listen_for_interruption(level, span_ms, "speaking") {
-                    self.interrupted();
-                }
-            }
+            // The same backstop as thinking: nothing but the speaker falling
+            // silent takes the window out of this state, and a missed
+            // announcement would strand it with the microphone open and no way
+            // back.
+            State::Speaking => self.still_waiting(THINK_PATIENCE, span_ms),
             State::Idle => {}
         }
     }
@@ -3299,33 +3310,6 @@ impl Application {
         }
     }
 
-    /// Watch one block for somebody talking over the top.
-    ///
-    /// The trace is what settles an argument about the threshold. Whether a
-    /// voice cleared the bar is not a thing anybody can tell by listening —
-    /// the only answer to "it did not pick me up" that is worth having is the
-    /// level, the bar, and how close it came.
-    fn listen_for_interruption(&self, level: f64, span_ms: u32, during: &str) -> bool {
-        let mut talk = self.imp().talk.borrow_mut();
-        let Some(talk) = talk.as_mut() else {
-            return false;
-        };
-        let before = talk.barge.elapsed_ms();
-        let interrupted = talk.barge.push(level, span_ms);
-        // Off the barge's own clock, not the window's: only some of these
-        // states advance the window's, so rate-limiting on it would log every
-        // block in one state and none in another.
-        if talk.barge.elapsed_ms() / 1_000 != before / 1_000 || interrupted {
-            crate::voice_log!(
-                "{during}: level {level:.2} against {:.2}, {:.0}% of the way to interrupting{}",
-                talk.barge.threshold(),
-                talk.barge.nearly() * 100.0,
-                if interrupted { " — interrupted" } else { "" }
-            );
-        }
-        interrupted
-    }
-
     /// Count a block spent waiting, and give up if it has been far too long.
     fn still_waiting(&self, patience_ms: u32, span_ms: u32) {
         let over = {
@@ -3386,7 +3370,6 @@ impl Application {
             }
             talk.spoken = crate::model::voice::Spoken::default();
             talk.endpointer = crate::model::voice::Endpointer::default();
-            talk.barge = crate::model::voice::Barge::default();
             talk.pending.clear();
             talk.live.clear();
             talk.answer.clear();
@@ -3783,7 +3766,6 @@ impl Application {
             // which is what decides whether the microphone is watched for an
             // interruption or read as a question.
             window.set_state(State::Speaking);
-            self.resettle_barge();
             crate::voice_log!("speaking the answer");
             return;
         }
@@ -3802,13 +3784,7 @@ impl Application {
             return;
         };
         match (speaking, window.state()) {
-            (true, State::Thinking | State::Speaking) => {
-                let starting = window.state() != State::Speaking;
-                window.set_state(State::Speaking);
-                if starting {
-                    self.resettle_barge();
-                }
-            }
+            (true, State::Thinking | State::Speaking) => window.set_state(State::Speaking),
             (false, State::Speaking) => {
                 // Only when there is nothing left to say. The speaker falls
                 // quiet between two sentences, and going back to listening
@@ -3824,24 +3800,6 @@ impl Application {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Learn the background again, now that what it is hearing has changed.
-    ///
-    /// `Barge` measures what is already there during a settle window and then
-    /// only ever revises it *down*. That is right within one phase and wrong
-    /// across two: the window it settled in was the room while the model was
-    /// thinking, and what arrives next is the assistant's own voice off the
-    /// speakers. Without this the bar stayed where a quiet room put it — and on
-    /// this desk a silent room peaks at 0.385, so it stayed above the median of
-    /// ordinary speech and interrupting took a raised voice and several seconds.
-    ///
-    /// The cost is that the first `settle_ms` of an answer cannot be interrupted,
-    /// which is not much of a cost: there is nothing to interrupt yet.
-    fn resettle_barge(&self) {
-        if let Some(talk) = self.imp().talk.borrow_mut().as_mut() {
-            talk.barge = crate::model::voice::Barge::default();
         }
     }
 

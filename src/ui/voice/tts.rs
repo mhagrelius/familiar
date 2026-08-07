@@ -15,9 +15,13 @@
 //! fails.
 //!
 //! Everything here is cancellable at a sentence boundary and mid-sentence, so
-//! pressing the shortcut while it is talking stops it talking. That is the
-//! whole of barge-in this app has: with the microphone closed while it speaks
-//! there is no echo to cancel and no half-heard interruption to get wrong.
+//! pressing the shortcut while it is talking stops it talking. **That is the
+//! whole of barge-in this app has**, and the measurement is why: the assistant's
+//! own voice off the speakers reaches this desk's microphone at a peak of 0.577,
+//! against 0.578 for the person in front of it. Nothing about a level separates
+//! those, so watching the microphone for somebody talking over the top was a
+//! coin toss between interrupting itself and not being interruptible at all —
+//! both of which happened. Audio arriving while it talks is discarded.
 
 use gio::prelude::*;
 use gtk::glib;

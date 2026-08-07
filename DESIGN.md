@@ -2101,6 +2101,28 @@ Where the finished thing differs from this document, this is what happened.
   stops it talking and starts listening, which is what interrupting somebody
   is, and it needs neither.
 
+  **This was then built anyway, used, and removed** — so the reason is now a
+  measurement rather than a judgement. `Barge` watched the microphone while the
+  answer played and triggered a margin above whatever it had learned during a
+  settle window. On this desk the assistant's own voice off the speakers reaches
+  the microphone at a peak of **0.577**, against **0.578** for the person in
+  front of it. The webcam's cancelling holds its median down to 0.014, so most of
+  it is gone — but it leaks in bursts, 16% of blocks above 0.32 in unbroken runs
+  up to 640 ms, against a `trigger_ms` of 160. There is no threshold in that, and
+  the behaviour was accordingly a coin toss decided by which 600 ms the settle
+  window happened to cover: a quiet one and it interrupted itself, a loud one and
+  it could not be interrupted at all. Both were reported. It also put the tail of
+  its own answer into the transcript of the next question, which is the same
+  fact wearing a different symptom.
+
+  Audio arriving while it is not listening is now discarded as it arrives. The
+  microphone stays open, because the watchdogs that get the window out of a stuck
+  state count in blocks of audio rather than carrying timers of their own.
+
+  On headphones the level approach works, and that is the trap: a feature whose
+  correctness depends on which output device is plugged in is worse than no
+  feature, because it is impossible to be told about usefully.
+
 - **`Store` lives in `project.rs`.** The file tree above named no owner for the
   data directory, and projects and their chats are one on-disk shape reached
   through one slug-to-path check. Splitting them would have put that check
@@ -2411,20 +2433,13 @@ room. **The room's idle floor had never actually been measured**, and it is
 0.124. One number standing in for another is how a floor of 0.20 came to be
 described as "well over a quiet room" while sitting *under* this one's p90.
 
-Barge-in moved for the same reason: `voice` was 0.18, set against that 0.01, so a
-quarter of the room's silent blocks cleared the floor meant to sit above them.
-0.32 is picked structurally rather than for comfort — the longest unbroken run of
-room noise above it is 120 ms and `trigger_ms` is 160, so a silent room *cannot*
-interrupt however long it is listened to, while ordinary speech reaches the
-trigger in four blocks.
-
-**The one number that argues against 0.32 has not been retaken.** The
-webcam-extension note records a raised voice reaching only 0.30 *while the
-assistant was speaking* — which is precisely the barge case, and just under this
-floor. It is a different measurement from the speech above, taken while the
-webcam was actively ducking, and it means interrupting may need more voice than
-it should. Retake it before defending 0.32: talk over an answer with
-`FAMILIAR_VOICE_LOG=1` and read the level it reports.
+The same substitution is what put barge-in on a floor of 0.18 and, once that was
+corrected, is what finally removed the feature: retaking the number it should
+always have been measured against — the assistant's own voice *as the microphone
+hears it* — gave a peak of 0.577 against 0.578 for a person, and no threshold
+lives in that. See "Speaking and listening do not overlap" above for the removal.
+Two rounds of tuning were spent on a threshold that could not exist, because the
+thing it separated had never been measured.
 
 **Everything above is one microphone in one room, and that is the honest status
 of it.** The shapes are general — a percentile beats a minimum, a ceiling is set
