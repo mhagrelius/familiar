@@ -767,6 +767,76 @@ fn finished(verb: &str, id: u32) -> String {
 /// One prior transcript, so `list` before transcribing is a call that can
 /// actually pay off, and one link that is a playlist, so the refusal is
 /// reachable.
+/// Dynamo's electricity readings, as a fixed house.
+///
+/// Shaped from the real account: three monitors, most circuits on one of them
+/// never named, and a set of merged 240 V circuits whose branch legs also exist.
+/// **The branch figures here deliberately sum to roughly twice the merged
+/// ones**, because the failure worth scoring is a model adding the two together
+/// and reporting a house that uses twice what it does.
+pub fn dynamo_reply(argv: &[String]) -> String {
+    let verb = crate::model::dynamo::verb(argv).unwrap_or_default();
+    let rest: Vec<&str> = argv
+        .iter()
+        .map(String::as_str)
+        .skip_while(|word| *word == "agent")
+        .skip(1)
+        .collect();
+    let line = rest.join(" ").to_lowercase();
+
+    match verb {
+        "describe" | "help" => r#"{"ok":true,"tool":"dynamo","reads_only":true,
+            "verbs":[{"verb":"channels"},{"verb":"now"},{"verb":"usage"},{"verb":"series"}],
+            "periods":["today","yesterday","week","month","year","all"],
+            "notes":["A merged channel is the sum of two branch legs; adding merged and branch figures together double-counts every large appliance."]}"#.to_string(),
+        "channels" | "circuits" => r#"{"ok":true,"count":6,"circuits":[
+            {"circuit":"Clothes Dryer","monitor":"basement (black)","channel":"101","kind":"merged","named":true},
+            {"circuit":"Water Heater","monitor":"basement (black)","channel":"99","kind":"merged","named":true},
+            {"circuit":"GeoThermal","monitor":"basement (black)","channel":"97","kind":"merged","named":true},
+            {"circuit":"Basement East","monitor":"basement (blank)","channel":"4","kind":"branch","named":true},
+            {"circuit":"basement (blank) ch5","monitor":"basement (blank)","channel":"5","kind":"branch","named":false},
+            {"circuit":"basement (red) ch7","monitor":"basement (red)","channel":"7","kind":"branch","named":false}]}"#.to_string(),
+        "now" | "current" | "live" => r#"{"ok":true,"unit":"W","as_of":"2026-08-17T19:30:00+00:00","count":4,
+            "note":"Newest reading per circuit within the last 30 minutes. A circuit absent from this list has not reported recently.",
+            "circuits":[{"circuit":"GeoThermal","watts":2140.0,"at":"2026-08-17T19:30:00+00:00"},
+            {"circuit":"Water Heater","watts":812.0,"at":"2026-08-17T19:30:00+00:00"},
+            {"circuit":"Basement East","watts":263.0,"at":"2026-08-17T19:30:00+00:00"},
+            {"circuit":"basement (red) ch7","watts":185.0,"at":"2026-08-17T19:30:00+00:00"}]}"#.to_string(),
+        "usage" | "energy" => {
+            if line.contains("kind=branch") {
+                // The trap, laid: branch legs, each about half of its circuit.
+                return r#"{"ok":true,"period":"yesterday","resolution":"1MIN","kind":"branch","total_kwh":41.2,"unit":"kWh","count":4,"matched":4,"truncated":false,
+                    "circuits":[{"circuit":"GeoThermal","kwh":9.1},{"circuit":"GeoThermal","kwh":9.0},
+                    {"circuit":"Water Heater","kwh":5.4},{"circuit":"Water Heater","kwh":5.3}]}"#.to_string();
+            }
+            if line.contains("year") || line.contains("all") {
+                return r#"{"ok":true,"period":"the last year","resolution":"1D","kind":"circuits","total_kwh":9840.5,"unit":"kWh","count":3,"matched":3,"truncated":false,
+                    "circuits":[{"circuit":"GeoThermal","kwh":5210.4},{"circuit":"Water Heater","kwh":2015.9},{"circuit":"Clothes Dryer","kwh":614.2}]}"#.to_string();
+            }
+            r#"{"ok":true,"period":"yesterday","resolution":"1MIN","kind":"circuits","total_kwh":41.2,"unit":"kWh","count":4,"matched":4,"truncated":false,
+                "circuits":[{"circuit":"GeoThermal","kwh":18.1},{"circuit":"Water Heater","kwh":10.7},
+                {"circuit":"Clothes Dryer","kwh":6.3},{"circuit":"Basement East","kwh":6.1}]}"#.to_string()
+        }
+        "series" | "history" => {
+            if line.contains("boiler") || line.contains("furnace") {
+                return r#"{"ok":false,"error":"no-such-circuit","message":"Nothing here is called that. `channels` lists them."}"#.to_string();
+            }
+            if line.contains("geothermal") {
+                // Two monitors, one name. A guess here is a wrong answer.
+                return r#"{"ok":false,"error":"ambiguous","message":"2 circuits match \"GeoThermal\".","candidates":[
+                    {"circuit":"GeoThermal","channel":"415375/97"},{"circuit":"GeoThermal","channel":"422778/97"}]}"#.to_string();
+            }
+            r#"{"ok":true,"circuit":"Water Heater","channel":"415375/99","period":"today","resolution":"1H","total_kwh":4.9,"count":3,"matched":3,"truncated":false,
+                "points":[{"at":"2026-08-17T06:00:00+00:00","kwh":2.1,"watts":2100.0},
+                {"at":"2026-08-17T07:00:00+00:00","kwh":1.9,"watts":1900.0},
+                {"at":"2026-08-17T08:00:00+00:00","kwh":0.9,"watts":900.0}]}"#.to_string()
+        }
+        other => format!(
+            "{{\"ok\":false,\"error\":\"bad-request\",\"message\":\"`{other}` is not a dynamo verb.\"}}"
+        ),
+    }
+}
+
 pub fn magpie_reply(argv: &[String]) -> String {
     let verb = crate::model::magpie::verb(argv).unwrap_or_default();
     let rest: Vec<&str> = argv

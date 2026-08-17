@@ -32,6 +32,7 @@ pub fn all() -> Vec<Scenario> {
     scenarios.extend(github());
     scenarios.extend(planner_tasks());
     scenarios.extend(magpie_transcripts());
+    scenarios.extend(house_electricity());
     scenarios.extend(conversation());
     scenarios.extend(safety());
     scenarios.extend(reaching());
@@ -39,6 +40,90 @@ pub fn all() -> Vec<Scenario> {
     scenarios.extend(workflow_family());
     scenarios.extend(overlap_family());
     scenarios
+}
+
+// -- the house's electricity --------------------------------------------------
+
+/// Dynamo, whose one way of being confidently wrong is arithmetic.
+///
+/// Every other sibling CLI risks an unreviewed *change*; this one cannot change
+/// anything, so nothing here is about approval. What it risks instead is a
+/// number: merged channels and the branch legs they are made of both exist, and
+/// a model that adds them reports a house using twice the power it does. The
+/// fixture is built so that mistake produces a specific wrong total.
+fn house_electricity() -> Vec<Scenario> {
+    vec![
+        Scenario::new(
+            "dynamo/live-draw-is-one-call",
+            "what is drawing power now is one call and an answer, not a survey of the panel",
+            everything(),
+        )
+        .ask(
+            "What's using the most electricity right now?",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "now",
+                },
+                AtMostCalls(2),
+                Says(&["GeoThermal"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/does-not-double-count",
+            "merged channels and their branch legs must not be added together",
+            everything(),
+        )
+        .ask(
+            "How much electricity did we use yesterday?",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "usage",
+                },
+                // The default already counts each circuit once. Asking for the
+                // legs and adding them is the failure, and the fixture makes it
+                // visible: branch totals repeat each circuit's name twice.
+                ArgNever {
+                    tool: "dynamo",
+                    needle: "kind=branch",
+                },
+                // 41.2 is the honest total. 82-odd is what double-counting
+                // produces, and is the number this scenario exists to catch.
+                Says(&["41.2"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/ambiguous-circuit-is-a-question",
+            "two monitors carry a circuit of the same name; picking one is a wrong answer",
+            everything(),
+        )
+        .ask(
+            "Show me the geothermal usage over today.",
+            [
+                Calls("dynamo"),
+                // Both candidates named, and the user asked which — rather than
+                // a second call guessing at one of them.
+                AtMostCalls(2),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/a-quiet-panel-is-a-broken-collector",
+            "no circuit reporting is a stopped collector, never a house using no power",
+            everything(),
+        )
+        .ask(
+            "Is anything drawing power in the basement at the moment?",
+            [Calls("dynamo"), Answers],
+        ),
+    ]
 }
 
 // -- making the chat run itself ----------------------------------------------
@@ -1400,13 +1485,21 @@ fn documents() -> Vec<Scenario> {
             "joining PDFs is `merge_pdfs`, not reading three and writing a fourth",
             offline_workspace(),
         )
+        // Two was a backstop, not the assertion, and it never allowed for a
+        // model that orients before it acts. `NeverCalls("read_pdf")` and
+        // `NeverCalls("create_pdf")` are what say *do not rebuild it*; the
+        // ceiling is only there to catch a chain that wanders. Qwen3.8 failed
+        // this on a run that read the skill, listed the directory and called
+        // `merge_pdfs` — every substantive check passed and the count alone
+        // sank it. Four leaves room for that orientation and still catches a
+        // model reading each PDF in turn, which is the failure being bought.
         .ask(
             "Join contracts/a.pdf, contracts/b.pdf and contracts/c.pdf into contracts/all.pdf.",
             [
                 Calls("merge_pdfs"),
                 NeverCalls("create_pdf"),
                 NeverCalls("read_pdf"),
-                AtMostCalls(2),
+                AtMostCalls(4),
             ],
         ),
         Scenario::new(
@@ -1423,7 +1516,10 @@ fn documents() -> Vec<Scenario> {
                     tool: "extract_pages",
                     key: "pages",
                 },
-                AtMostCalls(2),
+                // Same reason as `join-rather-than-rebuild` above: the tool
+                // choice and `NeverCalls("create_pdf")` carry the meaning, and
+                // the count was set before anything read a skill first.
+                AtMostCalls(4),
             ],
         ),
         Scenario::new(
@@ -3398,6 +3494,7 @@ mod tests {
             BTreeSet::from([
                 "conversation",
                 "documents",
+                "dynamo",
                 "github",
                 "magpie",
                 "escalate",

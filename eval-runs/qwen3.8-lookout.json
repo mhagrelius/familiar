@@ -1,0 +1,721 @@
+{
+  "label": "Qwen3.8-27B",
+  "model": "qwen3.8-27b",
+  "repeats": 3,
+  "prompt_digest": "You are looking over someone's day, to decide whether one thing in it is worth a short notification right now. They did not ask, and nobody is necessarily at the keyboard.\n\nSpeak when there is something that is **due today, happening today, already overdue, or about to stop being possible** — and that goes wrong if they do nothing about it today. A warning or an event that collides with something they have planned counts: the clash is the reason.\n\nOtherwise answer QUIET. Things that are NOT a reason to speak, however many of them there are: mail existing; a lot of mail existing; tasks existing; something looking interesting; a deadline still comfortably far off; not having said anything for a while; wanting to be helpful.\n\nName the single most important thing. One notice, never a digest.\n\nThree worked examples, which are examples of the *form* — do not reuse their words.\n\nSignals:\n- Tasks: \"Reply to Sam about lunch — due no due date\"\n- Mail: \"A newsletter — issue 12\"\nAnswer:\nQUIET\n\nSignals:\n- Tasks: \"Car MOT — expires today\"\n- Mail: \"A newsletter — issue 12\"\nAnswer:\nNOTICE: The car's MOT expires today\nAfter midnight it is not legal to drive, and booking a retest takes days.\n\nSignals:\n- Tasks: \"Drive to the airport — today at 05:00\"\n- Warnings: \"Freezing Rain Advisory until 08:00\"\nAnswer:\nNOTICE: Freezing rain is forecast through the airport run at 05:00\nThe advisory covers the whole drive, so it is worth leaving earlier than planned.\n\nAnswer in exactly one of those two forms. To stay quiet the whole reply is the word QUIET. To speak, the first line is NOTICE: followed by one line under 90 characters naming the specific thing, then one or two sentences saying why it matters today. No questions — they cannot reply. No other text and no markdown.",
+  "scenarios": [
+    {
+      "name": "lookout/an-ordinary-morning-is-quiet",
+      "about": "mail and tasks exist every day; neither is news, and surfacing them is how a notification gets muted",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nTasks due or overdue:\n- Put the bins out — no due date\n- Draft the quarterly report — due in 9 days\n\nUnread mail (subjects only):\n- Kernel Weekly — #412: what shipped this week\n- GitHub — [familiar] 2 new notifications\n\nWhat they have been working on:\n- Familiar: a GTK 4 desktop assistant",
+          "checks": [
+            "stays quiet"
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "mail and tasks exist every day; neither is news, and surfacing them is how a notification gets muted",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 421,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "mail and tasks exist every day; neither is news, and surfacing them is how a notification gets muted",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 179,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "mail and tasks exist every day; neither is news, and surfacing them is how a notification gets muted",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 179,
+          "generated_tokens": 3
+        }
+      ]
+    },
+    {
+      "name": "lookout/an-empty-day-is-never-even-asked",
+      "about": "nothing to reason about means no call — asking a model to find something in nothing is how a model invents something",
+      "asks": [
+        {
+          "user": "",
+          "checks": [
+            "stays quiet"
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "nothing to reason about means no call — asking a model to find something in nothing is how a model invents something"
+            }
+          ],
+          "rounds": 0,
+          "elapsed_ms": 0,
+          "generated_tokens": 0
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "nothing to reason about means no call — asking a model to find something in nothing is how a model invents something"
+            }
+          ],
+          "rounds": 0,
+          "elapsed_ms": 0,
+          "generated_tokens": 0
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "nothing to reason about means no call — asking a model to find something in nothing is how a model invents something"
+            }
+          ],
+          "rounds": 0,
+          "elapsed_ms": 0,
+          "generated_tokens": 0
+        }
+      ]
+    },
+    {
+      "name": "lookout/a-full-inbox-is-not-an-event",
+      "about": "there is always mail; volume is not urgency",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nUnread mail (subjects only):\n- Sender 1 — a message about something\n- Sender 2 — a message about something\n- Sender 3 — a message about something\n- Sender 4 — a message about something\n- Sender 5 — a message about something\n- Sender 6 — a message about something\n- Sender 7 — a message about something\n- Sender 8 — a message about something\n- Sender 9 — a message about something",
+          "checks": [
+            "stays quiet"
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "there is always mail; volume is not urgency",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 180,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "there is always mail; volume is not urgency",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 182,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "there is always mail; volume is not urgency",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 183,
+          "generated_tokens": 3
+        }
+      ]
+    },
+    {
+      "name": "lookout/a-distant-deadline-can-wait",
+      "about": "a task due in nine days is not today's problem, and saying so daily for nine days is the definition of nagging",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nTasks due or overdue:\n- Renew the lease — due in 9 days",
+          "checks": [
+            "stays quiet"
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "a task due in nine days is not today's problem, and saying so daily for nine days is the definition of nagging",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 162,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "a task due in nine days is not today's problem, and saying so daily for nine days is the definition of nagging",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 162,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "a task due in nine days is not today's problem, and saying so daily for nine days is the definition of nagging",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 159,
+          "generated_tokens": 3
+        }
+      ]
+    },
+    {
+      "name": "lookout/nothing-interesting-is-not-a-reason",
+      "about": "an interesting-looking message is not a time-bound one",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nUnread mail (subjects only):\n- Andrew Kelley — Zig 0.16 release notes\n- A conference — call for papers, closes in three months",
+          "checks": [
+            "stays quiet"
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "an interesting-looking message is not a time-bound one",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 165,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "an interesting-looking message is not a time-bound one",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 165,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "stays quiet",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "an interesting-looking message is not a time-bound one",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 164,
+          "generated_tokens": 3
+        }
+      ]
+    },
+    {
+      "name": "lookout/a-deadline-today-is-worth-a-word",
+      "about": "specific, time-bound, and the kind of thing that stops being actionable — the one shape that earns an interruption",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nTasks due or overdue:\n- Renew the lease — due today\n\nUnread mail (subjects only):\n- Kernel Weekly — #412: what shipped this week\n\nWhat they have been working on:\n- Contractors: Vandenberg did the roof",
+          "checks": [
+            "surfaces something",
+            "names \"lease\""
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 2,
+          "total": 2,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"lease\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "specific, time-bound, and the kind of thing that stops being actionable — the one shape that earns an interruption",
+              "answer": "NOTICE: The lease renewal is due today\nMissing this deadline risks a lapse in coverage or automatic penalty fees, so it needs to be handled before the day ends."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 523,
+          "generated_tokens": 35
+        },
+        {
+          "passed": 0,
+          "total": 2,
+          "failures": [
+            {
+              "check": "surfaces something",
+              "detail": "stayed quiet"
+            },
+            {
+              "check": "names \"lease\"",
+              "detail": "said \"\""
+            }
+          ],
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": false,
+              "detail": "stayed quiet"
+            },
+            {
+              "check": "names \"lease\"",
+              "passed": false,
+              "detail": "said \"\""
+            }
+          ],
+          "steps": [
+            {
+              "user": "specific, time-bound, and the kind of thing that stops being actionable — the one shape that earns an interruption",
+              "answer": "QUIET"
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 171,
+          "generated_tokens": 3
+        },
+        {
+          "passed": 2,
+          "total": 2,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"lease\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "specific, time-bound, and the kind of thing that stops being actionable — the one shape that earns an interruption",
+              "answer": "NOTICE: The lease renewal is due today\nMissing this deadline risks losing the property or facing penalties, so it must be handled now."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 457,
+          "generated_tokens": 29
+        }
+      ]
+    },
+    {
+      "name": "lookout/a-warning-that-changes-the-day",
+      "about": "a weather warning is worth saying when it collides with something they are doing, and the collision is the reason rather than the weather",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nTasks due or overdue:\n- Meet the roofer on site — today at 16:00\n\nActive weather warnings:\n- Severe Thunderstorm Warning until 21:00 — Damaging winds up to 60 mph and frequent lightning expected. Move indoors and away from elevated work.\n\nWhat they have been working on:\n- Roof: the north slope was replaced in April",
+          "checks": [
+            "surfaces something"
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "a weather warning is worth saying when it collides with something they are doing, and the collision is the reason rather than the weather",
+              "answer": "NOTICE: Severe thunderstorms expected during the 16:00 roofer meeting\nThe warning for damaging winds and lightning makes on-site work unsafe, so the appointment likely needs to be rescheduled."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 573,
+          "generated_tokens": 44
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "a weather warning is worth saying when it collides with something they are doing, and the collision is the reason rather than the weather",
+              "answer": "NOTICE: Severe thunderstorm warning until 21:00 clashes with 16:00 roofer visit\nDamaging winds and lightning make elevated roof work unsafe, so the appointment likely needs to be rescheduled today."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 636,
+          "generated_tokens": 50
+        },
+        {
+          "passed": 1,
+          "total": 1,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "a weather warning is worth saying when it collides with something they are doing, and the collision is the reason rather than the weather",
+              "answer": "NOTICE: Severe thunderstorms expected during the 16:00 roofer visit\nThe warning advises moving indoors and away from elevated work, so the on-site meeting should be rescheduled or moved to a safe indoor location."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 623,
+          "generated_tokens": 49
+        }
+      ]
+    },
+    {
+      "name": "lookout/an-overdue-thing-that-is-in-the-way",
+      "about": "overdue *and* connected to what they are working on now, which is what makes it different from the pile of things that are merely overdue",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nTasks due or overdue:\n- Send the signed roofing contract back — overdue by 4 days\n\nUnread mail (subjects only):\n- Ada Prins — chasing the signed contract, work starts Monday\n\nWhat they have been working on:\n- Contractors: Vandenberg Roofing did the roof",
+          "checks": [
+            "surfaces something",
+            "names \"contract\""
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 2,
+          "total": 2,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"contract\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "overdue *and* connected to what they are working on now, which is what makes it different from the pile of things that are merely overdue",
+              "answer": "NOTICE: The signed roofing contract is 4 days overdue and work starts today\nAda is chasing the signature because the crew is scheduled to begin immediately."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 474,
+          "generated_tokens": 32
+        },
+        {
+          "passed": 2,
+          "total": 2,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"contract\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "overdue *and* connected to what they are working on now, which is what makes it different from the pile of things that are merely overdue",
+              "answer": "NOTICE: The signed roofing contract is 4 days overdue and work starts today\nAda is chasing the signature and the job begins Monday, so the delay risks stopping the work or incurring penalties."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 541,
+          "generated_tokens": 41
+        },
+        {
+          "passed": 2,
+          "total": 2,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"contract\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "overdue *and* connected to what they are working on now, which is what makes it different from the pile of things that are merely overdue",
+              "answer": "NOTICE: The signed roofing contract is 4 days overdue and work starts today\nAda is chasing the signature because the crew is scheduled to begin immediately."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 478,
+          "generated_tokens": 32
+        }
+      ]
+    },
+    {
+      "name": "lookout/it-picks-the-one-that-matters",
+      "about": "with one real thing among the noise, the notice is about the real thing — a headline naming the newsletter would be worse than silence",
+      "asks": [
+        {
+          "user": "It is Monday 3 August, 08:30.\n\nTasks due or overdue:\n- Put the bins out — no due date\n- Passport renewal — expires tomorrow\n\nUnread mail (subjects only):\n- Kernel Weekly — #412\n- LinkedIn — you appeared in 4 searches\n\nWhat they have been working on:\n- Travel: flying to Amsterdam next month",
+          "checks": [
+            "surfaces something",
+            "names \"passport\"",
+            "does not name \"kernel weekly\"",
+            "does not name \"linkedin\""
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "passed": 4,
+          "total": 4,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"passport\"",
+              "passed": true
+            },
+            {
+              "check": "does not name \"kernel weekly\"",
+              "passed": true
+            },
+            {
+              "check": "does not name \"linkedin\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "with one real thing among the noise, the notice is about the real thing — a headline naming the newsletter would be worse than silence",
+              "answer": "NOTICE: Passport renewal expires tomorrow\nThe passport is invalid after today, which blocks the Amsterdam trip next month and likely requires an urgent appointment."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 552,
+          "generated_tokens": 30
+        },
+        {
+          "passed": 4,
+          "total": 4,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"passport\"",
+              "passed": true
+            },
+            {
+              "check": "does not name \"kernel weekly\"",
+              "passed": true
+            },
+            {
+              "check": "does not name \"linkedin\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "with one real thing among the noise, the notice is about the real thing — a headline naming the newsletter would be worse than silence",
+              "answer": "NOTICE: Passport renewal expires tomorrow\nIt is already overdue for action, and you are flying to Amsterdam next month, so you need to start the renewal process immediately to avoid missing your trip."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 558,
+          "generated_tokens": 40
+        },
+        {
+          "passed": 4,
+          "total": 4,
+          "verdicts": [
+            {
+              "check": "surfaces something",
+              "passed": true
+            },
+            {
+              "check": "names \"passport\"",
+              "passed": true
+            },
+            {
+              "check": "does not name \"kernel weekly\"",
+              "passed": true
+            },
+            {
+              "check": "does not name \"linkedin\"",
+              "passed": true
+            }
+          ],
+          "steps": [
+            {
+              "user": "with one real thing among the noise, the notice is about the real thing — a headline naming the newsletter would be worse than silence",
+              "answer": "NOTICE: Passport renewal expires tomorrow\nIt is due today to avoid being without a valid passport for your upcoming flight to Amsterdam."
+            }
+          ],
+          "rounds": 1,
+          "elapsed_ms": 424,
+          "generated_tokens": 27
+        }
+      ]
+    }
+  ]
+}

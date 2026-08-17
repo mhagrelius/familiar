@@ -83,6 +83,10 @@ pub const ALL: &[Capability] = &[
         summary: "the user's task list — read it, add to it, change it",
     },
     Capability {
+        name: "dynamo",
+        summary: "the house's own electricity use, per circuit, live and historical",
+    },
+    Capability {
         name: "magpie",
         summary: "turn a video or audio link into a transcript",
     },
@@ -121,6 +125,7 @@ pub fn is_on(tools: &ToolSet, name: &str) -> bool {
         "python" => tools.python,
         "github" => tools.github,
         "planner" => tools.planner,
+        "dynamo" => tools.dynamo,
         "magpie" => tools.magpie,
         "mail" => tools.mail,
         "escalate" => tools.escalate,
@@ -149,6 +154,7 @@ pub fn switch_on(tools: &mut ToolSet, name: &str) -> bool {
             tools.workspace = true;
         }
         "planner" => tools.planner = true,
+        "dynamo" => tools.dynamo = true,
         "magpie" => tools.magpie = true,
         "mail" => tools.mail = true,
         "escalate" => tools.escalate = true,
@@ -280,6 +286,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,

@@ -104,6 +104,14 @@ pub struct ToolSet {
     /// something to have switched on in a project that will never ask for it.
     #[serde(default)]
     pub magpie: bool,
+    /// The house's electricity per circuit, through Dynamo's `dynamo agent` CLI.
+    ///
+    /// Off by default like the other sibling CLIs, and unlike them it can only
+    /// ever read — there is no gated half. It is still a switch rather than an
+    /// always-on, because it is a paragraph of prompt about a house most
+    /// projects have no questions about.
+    #[serde(default)]
+    pub dynamo: bool,
     /// Writing and running Python in a container, through
     /// [`crate::model::sandbox`].
     ///
@@ -170,6 +178,7 @@ impl Default for ToolSet {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,
@@ -896,6 +905,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,

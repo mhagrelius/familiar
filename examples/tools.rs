@@ -47,6 +47,7 @@ fn main() {
         documents: false,
         planner: false,
         magpie: false,
+        dynamo: false,
         python: false,
         escalate: false,
         mail: false,

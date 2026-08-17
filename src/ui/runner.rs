@@ -12,6 +12,7 @@ use std::rc::Rc;
 use chrono::Utc;
 
 use crate::model::documents;
+use crate::model::dynamo;
 use crate::model::escalate;
 use crate::model::github;
 use crate::model::magpie;
@@ -297,6 +298,7 @@ impl Runner {
             // parser to keep in step with it.
             "workflow" => done(self.workflow(&call.arguments)),
             "gh" => self.gh(&tools::argv_of(&call.arguments), done),
+            "dynamo" => self.dynamo(&tools::argv_of(&call.arguments), done),
             "planner" => self.planner(&tools::argv_of(&call.arguments), done),
             "magpie" => self.magpie(&tools::argv_of(&call.arguments), done),
             "weather" => {
@@ -1266,6 +1268,45 @@ impl Runner {
     }
 
     // -- the sibling applications ---------------------------------------------
+
+    /// Run `dynamo agent`, which answers a query against Postgres on the NAS.
+    ///
+    /// Slower than `planner` — a network round trip over the tailnet rather
+    /// than D-Bus to a local process — but still well inside a turn, because
+    /// every query is bounded by the resolution Dynamo picks for the period.
+    fn dynamo<F>(&self, args: &[String], done: F)
+    where
+        F: FnOnce(ToolOutcome) + 'static,
+    {
+        if let dynamo::Decision::Refuse(why) = dynamo::classify(args) {
+            done(ToolOutcome::Failed(why));
+            return;
+        }
+        let command = dynamo::command(args);
+        run(command, move |output| {
+            done(match output {
+                Some(text) if !text.trim().is_empty() => ToolOutcome::Ok(tools::framed(
+                    &text,
+                    dynamo::MAX_OUTPUT,
+                    dynamo::note_for(&text),
+                )),
+                Some(_) => ToolOutcome::Failed(
+                    "`dynamo` ran and said nothing, which it should never do — it answers \
+                     JSON even for a refusal. Try `describe`."
+                        .into(),
+                ),
+                // Two different problems with one symptom, so name both: the
+                // binary missing, and the binary present but unable to reach
+                // the database it reads.
+                None => ToolOutcome::Failed(
+                    "Dynamo could not be run. Either it is not installed — its `install.sh` \
+                     puts `dynamo` in ~/.local/bin — or it has no database credentials in \
+                     ~/.config/dynamo/config.json."
+                        .into(),
+                ),
+            });
+        });
+    }
 
     /// Run `planner agent`, which answers in milliseconds and needs no
     /// directory: it talks to the running Planner over D-Bus, and its store is

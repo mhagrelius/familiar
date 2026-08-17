@@ -104,6 +104,9 @@ pub fn for_tools(tools: &ToolSet, has_vault: bool) -> Vec<Tool> {
     }
     // Neither needs a workspace: each talks to its own running application over
     // D-Bus, and each keeps its own store.
+    if tools.dynamo {
+        offered.push(dynamo_tool());
+    }
     if tools.planner {
         offered.push(planner_tool());
     }
@@ -249,6 +252,9 @@ pub fn guidance(tools: &ToolSet, has_vault: bool) -> Vec<String> {
             crate::model::workflow::Overlap::current(),
         ));
     }
+    if tools.dynamo {
+        notes.push(crate::model::dynamo::guidance());
+    }
     if tools.planner {
         notes.push(crate::model::planner::guidance());
     }
@@ -313,6 +319,10 @@ pub fn gate_for(name: &str, arguments: &str) -> Gate {
         "gh" => match crate::model::github::classify(&argv) {
             crate::model::github::Decision::Run(gate) => gate,
             crate::model::github::Decision::Refuse(_) => Gate::Never,
+        },
+        "dynamo" => match crate::model::dynamo::classify(&argv) {
+            crate::model::dynamo::Decision::Run(gate) => gate,
+            crate::model::dynamo::Decision::Refuse(_) => Gate::Never,
         },
         "planner" => match crate::model::planner::classify(&argv) {
             crate::model::planner::Decision::Run(gate) => gate,
@@ -1127,6 +1137,44 @@ fn planner_tool() -> Tool {
     }
 }
 
+/// Dynamo's electricity readings, as an argv after `dynamo agent`.
+///
+/// `Gate::Never` on the tool itself, not just per verb: unlike `planner` and
+/// `magpie` there is no verb underneath this that changes anything, so there is
+/// nothing for an approval dialog to be about.
+fn dynamo_tool() -> Tool {
+    Tool {
+        name: "dynamo",
+        gate: Gate::Never,
+        declaration: FunctionDeclaration {
+            name: "dynamo".into(),
+            description: "The house's own electricity, measured per circuit by three panel \
+                          monitors. `channels` lists the circuits, `now` is what each is \
+                          drawing in watts, `usage <period>` totals energy by circuit, \
+                          `series <circuit> <period>` is one circuit over time. Read-only, \
+                          so it runs immediately. Do not add merged and branch figures \
+                          together — the default counts each circuit once."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "args": {
+                        "type": "array",
+                        "description": "The arguments after `dynamo agent`, one per item: \
+                                        [\"usage\", \"yesterday\"] or [\"series\", \
+                                        \"Water Heater\", \"week\", \"scale=1H\"]. \
+                                        Periods are today, yesterday, week, month, year, \
+                                        all. Positional words and key=value pairs only — \
+                                        there are no --flags, and there is no shell.",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["args"]
+            }),
+        },
+    }
+}
+
 /// Magpie's transcripts, as an argv after `magpie agent`.
 fn magpie_tool() -> Tool {
     Tool {
@@ -1384,6 +1432,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,
@@ -1430,6 +1479,7 @@ mod tests {
                 documents: false,
                 planner: false,
                 magpie: false,
+                dynamo: false,
                 python: false,
                 escalate: false,
                 mail: false,
@@ -1445,6 +1495,7 @@ mod tests {
                 documents: true,
                 planner: false,
                 magpie: false,
+                dynamo: false,
                 python: false,
                 escalate: false,
                 mail: false,
@@ -1477,6 +1528,7 @@ mod tests {
                 documents: true,
                 planner: false,
                 magpie: false,
+                dynamo: false,
                 python: false,
                 escalate: false,
                 mail: false,
@@ -1510,6 +1562,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,
@@ -1555,6 +1608,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,
@@ -1575,6 +1629,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: false,
             escalate: false,
             mail: false,
@@ -1635,6 +1690,7 @@ mod tests {
                 documents: false,
                 planner: false,
                 magpie: false,
+                dynamo: false,
                 python: true,
                 escalate: true,
                 mail: false,
@@ -1682,6 +1738,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: true,
             escalate: false,
             mail: false,
@@ -1712,6 +1769,7 @@ mod tests {
             documents: false,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: true,
             escalate: true,
             mail: false,

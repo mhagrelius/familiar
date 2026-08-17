@@ -268,6 +268,12 @@ where
         .active(project.tools.planner)
         .build();
 
+    let dynamo = adw::SwitchRow::builder()
+        .title("Dynamo")
+        .subtitle("The house's electricity, per circuit — reads only, never asks")
+        .active(project.tools.dynamo)
+        .build();
+
     let magpie = adw::SwitchRow::builder()
         .title("Magpie")
         .subtitle("Transcribe a video — downloading takes minutes and needs your approval")
@@ -401,6 +407,7 @@ where
     tools.add(&scheduling);
     tools.add(&escalate);
     tools.add(&planner);
+    tools.add(&dynamo);
     tools.add(&magpie);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
@@ -485,6 +492,8 @@ where
         #[weak]
         magpie,
         #[weak]
+        dynamo,
+        #[weak]
         weather,
         #[strong]
         chosen,
@@ -514,6 +523,7 @@ where
                     documents: documents.is_active(),
                     planner: planner.is_active(),
                     magpie: magpie.is_active(),
+                    dynamo: dynamo.is_active(),
                     python: python.is_active(),
                     escalate: escalate.is_active(),
                     mail: mail.is_active(),

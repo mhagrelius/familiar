@@ -72,6 +72,8 @@ It statically links an ONNX Runtime that `ort-sys` downloads at build time, so t
 
 `planner` and `magpie` are driven as subprocesses, never linked — both hold their store in the running app's memory, so a second writer loses. `docs/planner-cli.md` and `docs/magpie-cli.md` document the interfaces; `planner agent describe` and `magpie agent describe` are the authority. Gating reads the verb, not the tool name, and anything unrecognised is gated.
 
+`dynamo` is the third, and the one that breaks the pattern in a useful way. Its store is Postgres on the NAS, so it *could* have been linked or served over HTTP; it is a subprocess because that is the shape this app already gates, caps and frames, and because the alternative is asking a service whose design note says it publishes no port to open one. **Every one of its verbs reads and none can come to write** — `agent` runs `SELECT`s as a role granted nothing else — so `classify` returns `Gate::Never` for known verbs and *refuses* unknown ones rather than gating them. There is no gated half to fall into. `docs/dynamo-cli.md` is the interface; `dynamo agent describe` is the authority. The failure worth knowing about is arithmetic rather than authority: merged channels and the branch legs they are made of both exist, and adding them reports a house using twice the power it does — which is what the `dynamo/does-not-double-count` scenario scores.
+
 `magpie transcribe` is the only slow tool. It goes through `ui::runner::run_slow`: stderr kept separate from stdout, progress streamed onto the tool chip as it arrives, and no timeout.
 
 ## Serena is the primary toolset for Rust code

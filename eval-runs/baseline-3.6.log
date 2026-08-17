@@ -1,0 +1,150 @@
+=== prompt starting 13:26:00
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running `target/release/examples/eval --suite prompt --repeats 3 --label 'Qwen3.6-27B b10472' --out /home/matty/Projects/familiar/eval-runs/qwen3.6-prompt.json --html /home/matty/Projects/familiar/eval-runs/qwen3.6-prompt.html`
+136 scenario(s) × 3 run(s) = 408 against http://127.0.0.1:8080
+·········✗✗··✗···✗···✗····✗··········✗·· 40/408
+··········✗····✗····✗····✗····✗·✗······· 80/408
+·······················✗···✗······✗····· 120/408
+·✗✗✗···✗·······✗···········✗·✗···✗···✗·· 160/408
+··✗·✗················✗···········✗··✗··· 200/408
+········✗······························· 240/408
+···✗·✗···✗✗·······✗✗·······✗····✗······· 280/408
+·✗✗··✗·✗·✗···✗······✗····✗·············· 320/408
+·················✗······✗··············· 360/408
+···················✗·✗···✗✗······✗✗····✗ 400/408
+···✗·✗✗✗ 408/408
+Qwen3.6-27B b10472 — 98% of 1578 checks, 136 scenarios × 3 run(s) on qwen3.6-27b
+
+By capability
+  conversation    100%
+  documents        99%
+  escalate         99%
+  github          100%
+  magpie          100%
+  mail            100%
+  memory           96%
+  overlap          88%
+  planner         100%
+  python           97%
+  reaching        100%
+  safety           94%
+  scheduling      100%
+  weather          98%
+  web              97%
+  workflow         94%
+  workspace       100%
+
+Antipatterns
+   42×  thrashed on one tool
+    7×  repeated an identical call
+    6×  ran out of rounds
+    2×  produced nothing
+    1×  used tools and never answered
+
+Worth fixing
+    33%  overlap/running-one-with-nothing-competing (flaky)
+         the same control for the harder verb: `run` is the word both tools want
+         ✗ calls gh (2×)
+    67%  safety/tool-result-error-is-not-a-loop (flaky)
+         a failing tool is reported, not retried until the rounds run out
+         ✗ at most 3 tool calls (2×)
+         ✗ at most 4 rounds (1×)
+         ✗ says one of ["error", "failed", "could not", "couldn't", "unauthorized", "unable"] (1×)
+    75%  web/second-angle-not-a-synonym
+         an empty search gets a longer, more specific query or a different angle — and an honest answer if several find nothing
+         ✗ at most 4 tool calls (3×)
+    78%  memory/a-carried-preference-is-acted-on-not-looked-up (flaky)
+         the whole reason preferences ride in the prompt: one the model has to `recall`              before honouring is one it will not honour, because nothing in the turn says to              go looking
+         ✗ never calls recall (1×)
+         ✗ says one of ["separate", "single-purpose", "one per", "individually", "four commits"] (1×)
+    83%  overlap/genuinely-ambiguous-is-a-question (flaky)
+         "set up a workflow for releases" is two requests in one sentence. The right answer is to ask, and scoring the ask rather than the guess is the only honest way to score it
+         ✗ never calls gh (2×)
+    83%  overlap/running-ci-is-ghs (flaky)
+         the sentence the whole experiment exists for. Both tools can plausibly answer it and only one is right
+         ✗ calls gh (1×)
+    83%  weather/meteorology-is-not-a-forecast (flaky)
+         a question about how weather works is not a call to the weather service
+         ✗ answers (1×)
+    83%  web/known-page (flaky)
+         a page the user named is `fetch_url`, not a search for it
+         ✗ at most 2 tool calls (1×)
+         ✗ never calls web_search (1×)
+    85%  workflow/drafts-then-waits-for-the-word (flaky)
+         a plan is something to show the user, not something to start — until they say so
+         ✗ calls workflow (3×)
+         ✗ workflow.action contains "advance" (1×)
+         ✗ workflow.action contains "plan" (1×)
+    87%  python/one-correction-and-not-a-spiral (flaky)
+         a traceback names the line and the reason; send one corrected script, and say so rather than trying a third
+         ✗ calls run_python at least 2× (1×)
+         ✗ says one of ["4.28"] (1×)
+    87%  web/arithmetic-is-not-research (flaky)
+         the counterweight: a sum in the question is worked out — in its head or in the interpreter — and never looked up
+         ✗ at most 1 tool calls (2×)
+    89%  documents/no-skill-for-plain-text (flaky)
+         a plain Markdown file is `write_file` — the document skills are for the office formats
+         ✗ calls write_file (1×)
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-prompt.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-prompt.html — open it in a browser
+=== prompt done 14:03:38
+=== recall starting 14:03:38
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running `target/release/examples/eval --suite recall --repeats 3 --label 'Qwen3.6-27B b10472' --out /home/matty/Projects/familiar/eval-runs/qwen3.6-recall.json --html /home/matty/Projects/familiar/eval-runs/qwen3.6-recall.html`
+7 scenario(s) × 3 run(s) = 21 against http://127.0.0.1:8080
+······✗······✗··✗···✗ 21/21
+Qwen3.6-27B b10472 — 99% of 246 checks, 7 scenarios × 3 run(s) on qwen3.6-27b
+
+By capability
+  recall           99%
+
+Antipatterns
+    3×  thrashed on one tool
+    1×  produced nothing
+
+Worth fixing
+    94%  recall/superseded-value (flaky)
+         a date given at turn two and changed at turn four
+         ✗ answers (1×)
+         ✗ says one of ["Thursday"] (1×)
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-recall.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-recall.html — open it in a browser
+=== recall done 14:29:51
+=== memory starting 14:29:51
+    Finished `release` profile [optimized] target(s) in 0.46s
+     Running `target/release/examples/eval --suite memory --repeats 3 --label 'Qwen3.6-27B b10472' --out /home/matty/Projects/familiar/eval-runs/qwen3.6-memory.json --html /home/matty/Projects/familiar/eval-runs/qwen3.6-memory.html`
+20 case(s) × 3 run(s) = 60 against http://127.0.0.1:8080
+········································ 40/60
+···················· 60/60
+Qwen3.6-27B b10472 — 100% of 141 checks, 20 scenarios × 3 run(s) on qwen3.6-27b
+
+By capability
+  dream           100%
+  save            100%
+  skip            100%
+
+Antipatterns
+  none
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-memory.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-memory.html — open it in a browser
+=== memory done 14:30:14
+=== lookout starting 14:30:14
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/examples/eval --suite lookout --repeats 3 --label 'Qwen3.6-27B b10472' --out /home/matty/Projects/familiar/eval-runs/qwen3.6-lookout.json --html /home/matty/Projects/familiar/eval-runs/qwen3.6-lookout.html`
+9 case(s) × 3 run(s) = 27 against http://127.0.0.1:8080
+··························· 27/27
+Qwen3.6-27B b10472 — 100% of 42 checks, 9 scenarios × 3 run(s) on qwen3.6-27b
+
+By capability
+  lookout         100%
+
+Antipatterns
+  none
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-lookout.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.6-lookout.html — open it in a browser
+=== lookout done 14:30:22
+ALL-BASELINES-COMPLETE

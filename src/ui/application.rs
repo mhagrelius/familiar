@@ -5038,6 +5038,7 @@ impl Application {
             // checkout of anything.
             "github" => workspace() && self.installed("gh"),
             "python" => self.installed("podman"),
+            "dynamo" => self.installed("dynamo"),
             "planner" => self.installed("planner"),
             "magpie" => self.installed("magpie"),
             // Live, because it is the one that changes mid-session: somebody

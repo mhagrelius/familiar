@@ -1,6 +1,7 @@
 pub mod capability;
 pub mod compaction;
 pub mod documents;
+pub mod dynamo;
 pub mod email;
 pub mod escalate;
 pub mod eval;

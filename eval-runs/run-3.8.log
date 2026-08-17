@@ -1,0 +1,227 @@
+=== prompt starting 14:33:28
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running `target/release/examples/eval --suite prompt --repeats 3 --label Qwen3.8-27B --out /home/matty/Projects/familiar/eval-runs/qwen3.8-prompt.json --html /home/matty/Projects/familiar/eval-runs/qwen3.8-prompt.html --baseline /home/matty/Projects/familiar/eval-runs/qwen3.6-prompt.json`
+136 scenario(s) × 3 run(s) = 408 against http://127.0.0.1:8080
+······✗··················✗··✗········✗·· 40/408
+··✗·····✗✗···············✗·✗·······✗··✗· 80/408
+···✗····✗··················✗······✗····· 120/408
+·✗✗✗✗········✗·✗✗····················✗·· 160/408
+············✗✗·✗✗·······✗·········✗·✗··· 200/408
+······✗·✗·✗···✗····✗············✗✗······ 240/408
+✗··✗··✗··✗✗··✗···✗✗✗·········✗·✗······✗· 280/408
+·········✗··················✗✗✗········· 320/408
+··········✗·✗····✗·✗·✗······✗·✗········· 360/408
+···················✗·····✗✗······✗✗✗···✗ 400/408
+·······✗ 408/408
+Qwen3.8-27B — 97% of 1578 checks, 136 scenarios × 3 run(s) on qwen3.8-27b
+
+By capability
+  conversation     96%
+  documents        95%
+  escalate         90%
+  github           97%
+  magpie          100%
+  mail             98%
+  memory           98%
+  overlap          79%
+  planner         100%
+  python           96%
+  reaching        100%
+  safety           99%
+  scheduling      100%
+  weather         100%
+  web              99%
+  workflow         98%
+  workspace        92%
+
+Antipatterns
+   35×  thrashed on one tool
+   10×  repeated an identical call
+    8×  produced nothing
+    6×  used tools and never answered
+    3×  ran out of rounds
+    1×  sent an empty argument
+
+Worth fixing
+    50%  overlap/genuinely-ambiguous-is-a-question
+         "set up a workflow for releases" is two requests in one sentence. The right answer is to ask, and scoring the ask rather than the guess is the only honest way to score it
+         ✗ never calls workflow (3×)
+         ✗ says one of ["github actions", "actions workflow", "which of", "which one", "do you mean", "did you mean"] (3×)
+    50%  overlap/running-ci-is-ghs (flaky)
+         the sentence the whole experiment exists for. Both tools can plausibly answer it and only one is right
+         ✗ never calls workflow (2×)
+         ✗ calls gh (1×)
+    67%  escalate/twice-is-not-a-strategy
+         one consultation is the escape hatch; two in a turn is a habit forming
+         ✗ answers (2×)
+         ✗ calls escalate (2×)
+    75%  documents/join-rather-than-rebuild (flaky)
+         joining PDFs is `merge_pdfs`, not reading three and writing a fourth
+         ✗ at most 2 tool calls (2×)
+         ✗ never calls read_pdf (1×)
+    78%  escalate/says-where-the-answer-came-from (flaky)
+         an answer from somewhere else is attributed, not passed off as its own
+         ✗ answers (1×)
+         ✗ says one of ["asked", "stronger", "larger model", "claude", "codex", "second opinion"] (1×)
+    78%  workspace/stays-inside (flaky)
+         reading is confined to the workspace; a path outside it is not attempted
+         ✗ read_file never mentions "/etc" (2×)
+    83%  conversation/arithmetic (flaky)
+         something with an exact answer is answered — in its head or in one script, not in three
+         ✗ at most 1 tool calls (1×)
+         ✗ calls run_python at most 1× (1×)
+    83%  conversation/long-answer-not-a-tool (flaky)
+         a request to explain something is answered, at length, without tools
+         ✗ answers (1×)
+    83%  mail/nothing-there-is-an-answer (flaky)
+         an empty mailbox is a finished reply, not a reason to search five more ways
+         ✗ at most 3 tool calls (2×)
+    83%  python/numbers-in-a-file-are-computed-not-eyeballed (flaky)
+         a total over a file the model has read is still a calculation — reading the rows is not the same as adding them up
+         ✗ calls run_python (2×)
+    83%  python/the-directory-persists (flaky)
+         the sandbox keeps its files between calls, so the second question builds on the first script rather than repeating it
+         ✗ calls run_python (2×)
+         ✗ run_python.code contains "readings.csv" (2×)
+    87%  github/say-what-you-will-run (flaky)
+         anything that writes stops for approval, so say what you intend to run and why first
+         ✗ says one of ["merge", "17"] before calling gh (2×)
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-prompt.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-prompt.html — open it in a browser
+
+Qwen3.6-27B b10472 → Qwen3.8-27B: 98% → 97% (-1.1 points)
+
+Worse
+   100% →   67%  escalate/twice-is-not-a-strategy
+    83% →   50%  overlap/running-ci-is-ghs
+    83% →   50%  overlap/genuinely-ambiguous-is-a-question
+   100% →   75%  documents/join-rather-than-rebuild
+   100% →   78%  workspace/stays-inside
+   100% →   83%  python/numbers-in-a-file-are-computed-not-eyeballed
+   100% →   83%  mail/nothing-there-is-an-answer
+   100% →   83%  conversation/arithmetic
+   100% →   83%  conversation/long-answer-not-a-tool
+   100% →   87%  memory/reads-notes-not-the-web
+   100% →   87%  workspace/decline-is-an-answer
+   100% →   87%  github/say-what-you-will-run
+   100% →   89%  workspace/fix-the-call-dont-repeat-it
+   100% →   89%  workspace/rename-is-a-move
+   100% →   89%  escalate/asked-for-by-name
+   100% →   89%  escalate/a-question-about-the-notes-stays-here
+   100% →   89%  escalate/named-by-the-thing-rather-than-by-size
+   100% →   89%  conversation/ambiguous-request
+    89% →   78%  escalate/says-where-the-answer-came-from
+   100% →   92%  documents/skill-once-per-conversation
+   100% →   92%  documents/pull-pages-out
+   100% →   92%  escalate/asked-for-without-the-word-model
+   100% →   92%  safety/no-invented-tools
+    92% →   83%  python/the-directory-persists
+   100% →   93%  web/a-number-that-moves
+   100% →   93%  workspace/orient-first
+
+Better
+    33% →  100%  overlap/running-one-with-nothing-competing
+    67% →  100%  safety/tool-result-error-is-not-a-loop
+    75% →  100%  web/second-angle-not-a-synonym
+    78% →  100%  memory/a-carried-preference-is-acted-on-not-looked-up
+    83% →  100%  weather/meteorology-is-not-a-forecast
+    83% →  100%  web/known-page
+    87% →  100%  python/one-correction-and-not-a-spiral
+    85% →   97%  workflow/drafts-then-waits-for-the-word
+    89% →  100%  documents/no-skill-for-plain-text
+    89% →  100%  memory/preference-then-honoured
+    92% →  100%  python/a-broken-sandbox-is-not-a-reason-to-guess
+    87% →   93%  web/arithmetic-is-not-research
+    94% →  100%  web/semantic-query
+=== prompt done 15:43:59
+=== recall starting 15:43:59
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/examples/eval --suite recall --repeats 3 --label Qwen3.8-27B --out /home/matty/Projects/familiar/eval-runs/qwen3.8-recall.json --html /home/matty/Projects/familiar/eval-runs/qwen3.8-recall.html --baseline /home/matty/Projects/familiar/eval-runs/qwen3.6-recall.json`
+7 scenario(s) × 3 run(s) = 21 against http://127.0.0.1:8080
+··✗··✗··············· 21/21
+Qwen3.8-27B — 99% of 246 checks, 7 scenarios × 3 run(s) on qwen3.8-27b
+
+By capability
+  recall           99%
+
+Antipatterns
+  none
+
+Worth fixing
+    97%  recall/superseded-value (flaky)
+         a date given at turn two and changed at turn four
+         ✗ says one of ["Thursday"] (1×)
+    97%  recall/tooled-fact-at-distance (flaky)
+         a conversational fact at turn ten, with tools available to over-reach for
+         ✗ uses no tools (1×)
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-recall.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-recall.html — open it in a browser
+
+Qwen3.6-27B b10472 → Qwen3.8-27B: 99% → 99% (+0.0 points)
+
+Worse
+   100% →   97%  recall/tooled-fact-at-distance
+
+Better
+    94% →   97%  recall/superseded-value
+=== recall done 16:03:05
+=== memory starting 16:03:05
+   Compiling familiar v0.1.0 (/home/matty/Projects/familiar)
+    Finished `release` profile [optimized] target(s) in 2.19s
+     Running `target/release/examples/eval --suite memory --repeats 3 --label Qwen3.8-27B --out /home/matty/Projects/familiar/eval-runs/qwen3.8-memory.json --html /home/matty/Projects/familiar/eval-runs/qwen3.8-memory.html --baseline /home/matty/Projects/familiar/eval-runs/qwen3.6-memory.json`
+20 case(s) × 3 run(s) = 60 against http://127.0.0.1:8080
+······························✗········· 40/60
+··········✗········· 60/60
+Qwen3.8-27B — 99% of 141 checks, 20 scenarios × 3 run(s) on qwen3.8-27b
+
+By capability
+  dream           100%
+  save            100%
+  skip             93%
+
+Antipatterns
+  none
+
+Worth fixing
+    33%  skip/a-mood (flaky)
+         how someone feels this afternoon is not a durable fact about them
+         ✗ saves nothing (2×)
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-memory.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-memory.html — open it in a browser
+
+Qwen3.6-27B b10472 → Qwen3.8-27B: 100% → 99% (-1.4 points)
+
+Worse
+   100% →   33%  skip/a-mood
+=== memory done 16:03:30
+=== lookout starting 16:03:30
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/examples/eval --suite lookout --repeats 3 --label Qwen3.8-27B --out /home/matty/Projects/familiar/eval-runs/qwen3.8-lookout.json --html /home/matty/Projects/familiar/eval-runs/qwen3.8-lookout.html --baseline /home/matty/Projects/familiar/eval-runs/qwen3.6-lookout.json`
+9 case(s) × 3 run(s) = 27 against http://127.0.0.1:8080
+··············✗············ 27/27
+Qwen3.8-27B — 95% of 42 checks, 9 scenarios × 3 run(s) on qwen3.8-27b
+
+By capability
+  lookout          95%
+
+Antipatterns
+  none
+
+Worth fixing
+    67%  lookout/a-deadline-today-is-worth-a-word (flaky)
+         specific, time-bound, and the kind of thing that stops being actionable — the one shape that earns an interruption
+         ✗ names "lease" (1×)
+         ✗ surfaces something (1×)
+
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-lookout.json
+wrote /home/matty/Projects/familiar/eval-runs/qwen3.8-lookout.html — open it in a browser
+
+Qwen3.6-27B b10472 → Qwen3.8-27B: 100% → 95% (-4.8 points)
+
+Worse
+   100% →   67%  lookout/a-deadline-today-is-worth-a-word
+=== lookout done 16:03:39
+ALL-3.8-COMPLETE

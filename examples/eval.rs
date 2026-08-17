@@ -55,11 +55,19 @@ const DEFAULT_ROUNDS: usize = 8;
 /// that is right. Here it is not: an unbounded generation that falls into a
 /// repetition loop keeps going until it has filled the whole 175k context, which
 /// costs twenty minutes of wall clock and blocks every scenario behind it. One
-/// stall of exactly that shape ate a measurement pass. This is far above any
-/// real answer — a long reply with its thinking runs a few hundred tokens — so
-/// hitting it is itself the finding, and the trace records the truncation as a
-/// step that produced nothing rather than as a result.
-const MAX_GENERATED: u32 = 4096;
+/// stall of exactly that shape ate a measurement pass. Hitting it is meant to be
+/// the finding itself, and the trace records the truncation as a step that
+/// produced nothing rather than as a result.
+///
+/// **It was 4096, and that was a measurement of Qwen3.6's appetite rather than a
+/// ceiling.** 3.6 never generated more than 3229 tokens in any run of the whole
+/// suite; Qwen3.8 at `medium` reasoning effort crossed 4096 fifteen times in the
+/// same 408 runs and peaked at 8426. Every one of those truncations scored as an
+/// empty answer, which cost the `escalate` family nine of its thirty-five runs
+/// and read as a model regression until the token counts were looked at. A cap
+/// tuned to one model's thinking budget silently grades the next one down.
+/// Raising it cannot move a 3.6 number, because 3.6 never reached the old value.
+const MAX_GENERATED: u32 = 16384;
 
 /// How many times a run the server never completed is tried again.
 const DEFAULT_RETRIES: usize = 2;

@@ -919,6 +919,20 @@ fn default_reply(tool: &str, arguments: &str) -> Reply {
                 }
             }
         }
+        "dynamo" => {
+            let argv = crate::model::tools::argv_of(arguments);
+            match crate::model::dynamo::classify(&argv) {
+                crate::model::dynamo::Decision::Refuse(why) => Reply::failed(why),
+                crate::model::dynamo::Decision::Run(_) => {
+                    let json = world::dynamo_reply(&argv);
+                    Reply::ok(crate::model::tools::framed(
+                        &json,
+                        crate::model::dynamo::MAX_OUTPUT,
+                        crate::model::dynamo::note_for(&json),
+                    ))
+                }
+            }
+        }
         "magpie" => {
             let argv = crate::model::tools::argv_of(arguments);
             match crate::model::magpie::classify(&argv) {
@@ -1349,6 +1363,7 @@ mod tests {
             documents: true,
             planner: false,
             magpie: false,
+            dynamo: false,
             python: true,
             escalate: true,
             mail: false,
