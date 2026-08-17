@@ -291,7 +291,11 @@ pub fn guidance(tools: &ToolSet, has_vault: bool) -> Vec<String> {
              have told the user so; or the request is ambiguous, destructive or beyond what \
              you have here, and the user needs to decide. Each of those is a finished turn, \
              not an obstacle to work around.\n\n\
-             Gather only what you need — one or two reads is usually enough."
+             Gather only what you need — one or two reads is usually enough. A listing \
+             already tells you what is there; you do not have to open everything in it to \
+             say what the user has. And a tool that reports success has succeeded — do not \
+             read a file back, or list a directory again, to check a change you were just \
+             told was made."
                 .to_string(),
         );
     }

@@ -1498,7 +1498,15 @@ fn documents() -> Vec<Scenario> {
             [
                 Calls("merge_pdfs"),
                 NeverCalls("create_pdf"),
-                NeverCalls("read_pdf"),
+                // `Before` rather than `NeverCalls("read_pdf")`, which is
+                // order-blind. What this scenario is against is reading the
+                // three inputs *in order to rebuild* them; reading the result
+                // afterwards to check it worked is a different act with the
+                // same tool name. The old check could not tell them apart and
+                // failed a run that called `merge_pdfs` correctly and then
+                // looked at what it had made. Vacuously true when `read_pdf`
+                // is never called, so the clean trace still passes.
+                Before("merge_pdfs", "read_pdf"),
                 AtMostCalls(4),
             ],
         ),
@@ -2402,8 +2410,17 @@ fn github() -> Vec<Scenario> {
                     key: "args",
                     needle: "merge",
                 },
-                SaysBefore {
+                // Keyed on the *merge*, not on the first `gh`. One tool covers
+                // `pr view` and `pr merge`, and a model that checks the PR is
+                // mergeable before merging it was being judged on what it said
+                // before the read. Qwen3.8 announced every merge — "approved,
+                // mergeable, tests and clippy pass — merging it now" — and
+                // failed all three runs because a `pr view` came first. Looking
+                // before writing is the behaviour this suite wants everywhere
+                // else; it should not cost a scenario about announcing writes.
+                SaysBeforeArgs {
                     tool: "gh",
+                    needle: "merge",
                     words: &["merge", "17"],
                 },
                 AtMostCalls(3),
@@ -3476,7 +3493,8 @@ mod tests {
             | ArgAbsent { tool, .. }
             | ArgWordsAtMost { tool, .. }
             | ArgWordsAtLeast { tool, .. }
-            | SaysBefore { tool, .. } => vec![tool],
+            | SaysBefore { tool, .. }
+            | SaysBeforeArgs { tool, .. } => vec![tool],
             Before(first, second) => vec![first, second],
             CallsOnly(tools) | CallsAny(tools) => tools.to_vec(),
             NoTools | AtMostCalls(_) | AtMostRounds(_) | Answers | Says(_) | NeverSays(_) => {

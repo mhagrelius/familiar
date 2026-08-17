@@ -105,17 +105,44 @@ pub fn guidance() -> String {
     "`dynamo` is the house's own electricity, measured per circuit by three panel monitors \
      and kept minute by minute. Everything it does is read-only. Call it with the arguments \
      after `dynamo agent`: `channels` lists the circuits, `now` is what each is drawing in \
-     watts, `usage <period>` totals energy by circuit, `series <circuit> <period>` is one \
-     circuit over time.\n\n\
-     Periods are `today`, `yesterday`, `week`, `month`, `year`, `all`, and a day means a \
-     calendar day rather than the last 24 hours.\n\n\
+     watts, `usage <period>` totals energy by circuit in kWh, `series <circuit> <period>` is \
+     one circuit over time.\n\n\
+     Periods are `today`, `yesterday`, `week`, `month`, `year`, `all`. A day is a calendar \
+     day in the user's own timezone, not the last 24 hours, and every timestamp that comes \
+     back is already in their local time — read the clock time as written rather than \
+     converting it.\n\n\
      **Do not add merged and branch figures together.** A 240 V circuit is wired across two \
      branch legs and also appears as one merged channel, so summing both counts every large \
      appliance twice. The default `kind=circuits` already counts each circuit once — leave it \
      alone unless a question is specifically about the legs.\n\n\
+     **Most circuits have never been named**, and appear as the monitor plus a channel \
+     number, like `basement (red) ch12`. That is not an appliance and does not tell the user \
+     anything — when one of those is the answer, say plainly that the circuit is unnamed, \
+     give its channel, and mention they can name it in the Inhab app so it reads properly \
+     next time. Never invent a plausible appliance for one.\n\n\
+     **A circuit is a breaker, not an appliance.** Several things can share one, so a \
+     circuit named for the loudest thing on it still carries whatever else is wired to it — \
+     which is why a named circuit rarely falls to zero. Attribute usage to the circuit, not \
+     to the appliance, unless the user has said the two are the same.\n\n\
      Only one of the three monitors has mains CTs, so `kind=main` is that panel's total and \
-     not the whole house. If someone asks what the house used, say which it is."
+     not the whole house. If someone asks what the house used, say which it is.\n\n\
+     There is no tariff here and no price per kWh. If someone asks what something cost, ask \
+     what they pay or say you would be guessing — do not put a currency figure on it."
         .to_string()
+}
+
+/// Whether a circuit label is Dynamo's fallback rather than a name somebody
+/// chose.
+///
+/// The fallback is `<monitor> ch<number>` — `basement (red) ch12` — built when
+/// `channel.name` is null, which is true of most of one monitor. Matching the
+/// shape rather than asking the tool keeps this a property of the string, so a
+/// circuit a person happens to have named "Shed ch2" is a false positive that
+/// costs one unnecessary sentence, which is the right direction to be wrong in.
+fn is_unnamed(label: &str) -> bool {
+    label.rsplit_once(" ch").is_some_and(|(before, n)| {
+        !before.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 /// What the model is told alongside a response, when the response has a shape
@@ -152,6 +179,32 @@ pub fn note_for(response: &str) -> Option<String> {
              reporting zero usage."
                 .into(),
         );
+    }
+
+    // An unnamed circuit at the top of an answer is the most likely thing to be
+    // dressed up as an appliance, and only the response knows whether one is
+    // there. Checked before truncation because it changes what the answer says
+    // rather than how complete it is.
+    let unnamed: Vec<String> = parsed
+        .get("circuits")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .take(3)
+                .filter_map(|c| c.get("circuit").and_then(serde_json::Value::as_str))
+                .filter(|name| is_unnamed(name))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !unnamed.is_empty() {
+        return Some(format!(
+            "{} of the circuits near the top of this answer have never been named — {}. Those \
+             are channel numbers, not appliances: say so plainly, give the channel, and \
+             mention they can be named in the Inhab app. Do not guess what is on them.",
+            unnamed.len(),
+            unnamed.join(", ")
+        ));
     }
 
     if parsed.get("truncated").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -244,13 +297,33 @@ mod tests {
     }
 
     #[test]
-    fn the_guidance_leads_with_the_double_counting_rule() {
+    fn the_guidance_covers_every_way_this_data_reads_wrong() {
         let g = guidance();
-        assert!(g.contains("merged"), "{g}");
-        assert!(g.contains("twice"), "{g}");
-        // And says the whole-house caveat, which is the other confident wrong
-        // answer available here.
-        assert!(g.contains("not the whole house"), "{g}");
+        // Each of these is a way to be confidently wrong about a real house,
+        // and each was found by looking at what actually comes back rather
+        // than by imagining what might.
+        for (needle, why) in [
+            ("twice", "merged and branch legs added together"),
+            (
+                "not the whole house",
+                "one monitor has mains CTs, three exist",
+            ),
+            ("never been named", "32 of 40 circuits are a channel number"),
+            ("breaker, not an appliance", "several loads share one CT"),
+            ("local time", "timestamps read four hours out otherwise"),
+            ("no tariff", "a model will otherwise invent a price"),
+        ] {
+            assert!(g.contains(needle), "guidance does not cover {why}:\n{g}");
+        }
+    }
+
+    #[test]
+    fn the_guidance_names_both_units() {
+        // `now` is watts and `usage` is kWh. A model that mixes them reports a
+        // kettle as using 2 kWh at this instant.
+        let g = guidance();
+        assert!(g.contains("watts"), "{g}");
+        assert!(g.contains("kWh"), "{g}");
     }
 
     #[test]
@@ -272,6 +345,46 @@ mod tests {
         // now", said about a service that stopped collecting last Tuesday.
         let note = note_for(r#"{"ok":true,"unit":"W","count":0,"circuits":[]}"#).expect("a note");
         assert!(note.contains("collector has stopped"), "{note}");
+    }
+
+    #[test]
+    fn an_unnamed_circuit_at_the_top_is_flagged_rather_than_dressed_up() {
+        // The real shape of an answer here: the biggest consumer is a channel
+        // number nobody has labelled. A model that reports "basement (red)
+        // ch12 is your biggest draw" has told the user nothing, and one that
+        // guesses "that'll be your dryer" has told them something false.
+        let note = note_for(
+            r#"{"ok":true,"unit":"W","count":2,"circuits":[
+                {"circuit":"basement (red) ch12","watts":1254.0},
+                {"circuit":"Water Heater","watts":812.0}]}"#,
+        )
+        .expect("a note");
+        assert!(note.contains("basement (red) ch12"), "{note}");
+        assert!(note.contains("Inhab app"), "{note}");
+        assert!(note.contains("Do not guess"), "{note}");
+    }
+
+    #[test]
+    fn an_answer_of_named_circuits_is_left_alone() {
+        assert_eq!(
+            note_for(
+                r#"{"ok":true,"unit":"W","count":2,"circuits":[
+                    {"circuit":"Water Heater","watts":812.0},
+                    {"circuit":"Clothes Dryer","watts":40.0}]}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_unnamed_shape_is_recognised_without_asking_the_tool() {
+        assert!(is_unnamed("basement (red) ch12"));
+        assert!(is_unnamed("basement (blank) ch3"));
+        assert!(!is_unnamed("Water Heater"));
+        assert!(!is_unnamed("Basement East"));
+        // No number after `ch`, so not the fallback shape.
+        assert!(!is_unnamed("Church"));
+        assert!(!is_unnamed("ch4"));
     }
 
     #[test]

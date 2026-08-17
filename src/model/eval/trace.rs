@@ -295,6 +295,28 @@ impl<'a> View<'a> {
         })
     }
 
+    /// What the model said before the first call to this tool whose arguments
+    /// mention the needle, or `None` if there was no such call.
+    ///
+    /// [`View::said_before`] keys on the *first* call to a tool, which stops
+    /// being the right question the moment a model looks before it leaps. `gh`
+    /// is one tool covering both `pr view` and `pr merge`, and a model that
+    /// checks the PR is mergeable, says "merging it now", and then merges was
+    /// scored against what it said before the *read* — so verifying first, which
+    /// is the better behaviour, failed a check about announcing the write.
+    /// Qwen3.6 called `gh` once and never exposed this; Qwen3.8 failed all three
+    /// runs on it. The gates read the verb rather than the tool name, so keying
+    /// on the argument matches how the call is actually judged.
+    pub fn said_before_matching(&self, tool: &str, needle: &str) -> Option<String> {
+        let needle = needle.to_lowercase();
+        self.steps.iter().find_map(|step| {
+            let at = step.calls.iter().find(|call| {
+                call.name == tool && call.all_arguments().to_lowercase().contains(&needle)
+            })?;
+            Some(step.preamble_through(at.round))
+        })
+    }
+
     /// The last answer, which is the one the user would read.
     pub fn answer(&self) -> &str {
         self.steps
