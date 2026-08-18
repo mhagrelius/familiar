@@ -440,7 +440,17 @@ fn workspace_tools() -> Vec<Tool> {
             gate: Gate::Never,
             declaration: FunctionDeclaration {
                 name: "list_dir".into(),
-                description: "List what is in a directory of the workspace.".into(),
+                // The second sentence is here rather than in the workspace note
+                // because the note did not land. Asked "what have I got in
+                // here?", Qwen3.8 listed all four directories — correct — and
+                // then opened all six files, twice in three runs, with the
+                // prompt already saying to gather only what is needed. A rule
+                // attached to the tool being chosen carries further than the
+                // same rule in a paragraph above.
+                description: "List what is in a directory of the workspace. The listing is \
+                              itself the answer to what is in there; opening every file it \
+                              names is rarely needed."
+                    .into(),
                 parameters: path("A path relative to the workspace root. \".\" for the root."),
             },
         },
