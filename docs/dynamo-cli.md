@@ -65,9 +65,30 @@ which.
 | `usage` | `<period> [kind=…]` | energy by circuit over a period, kWh, biggest first |
 | `series` | `<circuit> <period> [scale=…]` | one circuit's readings over a period |
 
-Periods are `today`, `yesterday`, `week`, `month`, `year`, `all`. A day is a
-**calendar** day: "yesterday" is midnight to midnight, not the twenty-four hours
-before now.
+Periods are `today`, `yesterday`, `week`, `month`, `year`, `all`, **and there is
+nothing else**. `usage july` and `usage 2026-07` are refused with the list; there
+is no calendar month and no date range. `month` means the last 30 days and
+`year` the last 365, counted back from now. A day is a **calendar** day:
+"yesterday" is midnight to midnight, not the twenty-four hours before now.
+
+`scale=` takes `1MIN`, `15MIN`, `1H` or `1D` and refuses anything else — a real
+run wrote `scale=1M` and got a `bad-request` back saying so.
+
+### Asking for minutes over a long period gets you a week
+
+**Minute readings are kept for about a week**; hourly and daily reach back to
+January 2025. Dynamo does not refuse a mismatch, and it does not relabel the
+answer either:
+
+```
+series "Water Heater" month            → 568.941 kWh, 1H, from 20 July
+series "Water Heater" month scale=1MIN → 135.449 kWh, 1MIN, from 11 August
+```
+
+Both call themselves `"period": "the last 30 days"`. The second is four times
+too small and the only thing in the response that says so is the first
+timestamp — which lives inside a `points` array long enough to be truncated.
+Leave `scale` off unless the period is short.
 
 ## The thing that will produce a wrong answer
 
@@ -79,9 +100,24 @@ draw.
 
 `kind=circuits` is the default and is the safe set: merged channels, plus the
 branch legs that belong to no merge. That is every circuit exactly once.
-`kind=branch` and `kind=merged` exist for questions that genuinely want one
-side, and `kind=main` is the mains CTs — which only **one of the three
-monitors** has, so a "whole house" total from it covers that panel alone.
+
+The four kinds, measured on one day (31 July 2026):
+
+| `kind` | Total | What it is |
+| --- | --- | --- |
+| `circuits` (default) | 140.738 | every circuit exactly once |
+| `branch` | 140.738 | the same energy, reached by summing legs |
+| `merged` | 41.636 | the 240 V circuits alone |
+| `main` | 140.330 | one monitor's mains CTs |
+
+**`branch` and `circuits` come to the same number**, because a merged channel
+*is* its legs — so asking for branch is not the mistake. The mistake is adding
+`merged` to either, which gives 182 kWh for a house that used 140. And `main`
+is close enough to the house to read as it while covering one panel of three.
+
+A `usage` list also **leaves out any circuit that used nothing** — 27 rows for
+40 circuits on that day. Absence means zero, not unmonitored; `channels` is
+what settles which.
 
 This is the note the guidance leads with, because it is the one way to read
 this data confidently and wrongly.
@@ -93,8 +129,22 @@ JSON on stdout, always, including for refusals — `{"ok": false, "error": …,
 the truth is "no circuit is called that, here is how to list them" will report
 the wrong thing.
 
+**Keys come back alphabetically**, which matters more than it should. In a
+`series` answer `points` sorts before `resolution`, `total_kwh` and `truncated`,
+so anything long enough to hit Familiar's own 8,000-character cap loses every
+figure and keeps every row. `dynamo agent series "Water Heater" week` is 9,355
+bytes, so this is an ordinary question rather than an edge case, and
+`dynamo::note_for` restates the headline after the cut for exactly that reason.
+
 `usage` and `series` carry `matched`, `count` and `truncated`, the same fields
-Planner uses, so the same page-not-the-whole-list note applies. `series` answers
-`{"ok": false, "error": "ambiguous", "candidates": […]}` when a name matches
-more than one circuit, which happens: two channels on different monitors are
-deliberately named the same thing.
+Planner uses, so the same page-not-the-whole-list note applies — with one
+difference worth stating: **`total_kwh` is the whole period even when the rows
+are a page.** It is the shape over time that is incomplete, not the total.
+
+`series` answers `{"ok": false, "error": "ambiguous", "candidates": […]}` when a
+name matches more than one circuit. **This is a partial match, not a duplicate
+name** — no two circuits in this house share one. Asking for "geothermal" gets
+eight candidates and asking for "kitchen" gets six, and the shape of the list is
+the part that matters: a 240 V circuit appears three times under one name, once
+as the merged channel and once for each leg. A leg is exactly half the circuit,
+so guessing one is a wrong answer that survives a sanity check.

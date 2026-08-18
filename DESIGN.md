@@ -1335,6 +1335,95 @@ install` and `gh alias set` are arbitrary code and command redefinition arriving
 under a plausible name. `gh codespace` is a shell on another machine, which is a
 way around every limit here.
 
+### The house's electricity
+
+`dynamo` is the third sibling CLI, and the first where **no verb can change
+anything**. Planner gates an unknown verb because the answer to "does this
+mutate" might be yes; here it is no and cannot become yes — `dynamo agent` runs
+`SELECT`s as a Postgres role granted nothing else, and the writes Dynamo does
+perform come from a collector loop in a container on the NAS that this cannot
+reach. So `classify` returns `Gate::Never` for a known verb and *refuses* an
+unknown one rather than gating it. There is no gated half to fall into, and a
+verb Dynamo gains later costs a second call rather than an unreviewed write.
+
+It is a subprocess for the usual reason inverted. Planner and Magpie have to be,
+because each holds its store in the running app's memory and a second writer
+loses; Dynamo's store is Postgres and would take a second reader happily. It is
+a subprocess because that is the shape this app already gates, caps and frames,
+and because the alternative is asking a service whose design note says it
+publishes no port to open one.
+
+#### The interesting risk is arithmetic, not authority
+
+Nothing here can break the house. What it can do is report a number about it
+that is wrong, and a number is what the user repeats. Five ways, all measured
+against the real account rather than reasoned about:
+
+- **Merged and branch are the same energy counted twice.** A 240 V circuit is
+  wired across two legs and also appears as one merged channel. `kind=circuits`
+  is the default and counts each circuit exactly once; adding `kind=merged` back
+  on top gives 182 kWh for a house that used 140.
+- **`kind=main` is one panel.** Only one of the three monitors has mains CTs,
+  and its total — 140.33 against the house's 140.74 — is close enough to read as
+  the answer.
+- **`scale=1MIN` over a long period answers from a week.** Minute readings are
+  kept about a week; hourly and daily go back years. So `series <circuit> month
+  scale=1MIN` returns 135.4 kWh *labelled "the last 30 days"*, against 568.9 for
+  the same question at the resolution Dynamo picks. Four times out, from a
+  question nobody would call unusual, and the only clue in the response is the
+  first timestamp — inside an array that has just been truncated.
+- **A `usage` list omits whatever used nothing.** 27 rows for 40 circuits. A run
+  read the dryer's absence as "it isn't on any named circuit" and said so; the
+  dryer is channel 101 and is named. It had used nothing that day.
+- **Most circuits have no name.** Thirteen of forty. The biggest live draw in
+  this house is `basement (blank) ch3`, and both available failures are bad:
+  reporting the channel number tells the user nothing, and guessing an appliance
+  for it tells them something false.
+
+The first two and the last are in the prompt; the rest ride on `note_for`,
+because [where a rule lives is worth more than how it is
+worded](#where-a-rule-lives-is-worth-more-than-how-it-is-worded). The dividing
+line is whether the rule changes a decision made *before* the call — reaching
+for `series` after `usage`, leaving `scale=` alone, not asking for July — since
+nothing in a response can come back and correct those. A test asserts the
+prompt does *not* carry the four rules that belong in a result.
+
+#### Familiar's own cap cuts the figures off first
+
+`MAX_OUTPUT` is 8,000 characters and `dynamo agent series "Water Heater" week`
+is 9,355 — an ordinary question. Dynamo sorts its JSON keys, so `points`
+precedes `resolution`, `total_kwh` and `truncated`: the cut lands inside the
+array and takes **every figure** while keeping every row. The generic footer
+`framed` appends then recommends retrying with `limit=N`, which Dynamo accepts
+and silently ignores, so the retry returns the identical answer.
+
+The fix is in `note_for` rather than in a larger cap: when a response is longer
+than the cap, the note restates the headline — circuit, period, resolution,
+total, rows matched — and says to ignore the `limit=N` advice. A note is
+appended *after* the cut, which is the only reason this works.
+
+#### The fixture was the thing under test
+
+The `dynamo` family scored **100% of 90 checks** at six repeats and was
+measuring nothing. Its world had six circuits, four of them named, and a tidy
+`GeoThermal` as the biggest live draw; the real house has forty circuits,
+thirteen named, and answers `basement (blank) ch3`. So the note that exists to
+stop a model dressing a channel number up as an appliance could never fire. It
+also had the double count backwards — branch figures repeated at half value,
+where the real tool returns the same total by a different route — so the trap
+the family was named for was not in it. Timestamps were `+00:00` against
+guidance that says they arrive local, and dated a fortnight off the suite's own
+clock.
+
+Rebuilt from `dynamo agent` against the real account, at the real proportions,
+the same family scores **87% of 342 checks**. `world.rs` now holds the fixture
+to its own arithmetic — the rows sum to the total they are reported under, the
+mains figure sits within 5 kWh of the house, thirteen of forty are named, a
+week of readings overruns the cap — so the next version of this cannot quietly
+stop being a house. This is the sixth instance of the pattern in
+`familiar-fixture-lies`, and the most expensive: the score was perfect and the
+capability was untested.
+
 ### Two tools that share an English word
 
 `gh workflow list` is a real subcommand, `gh workflow run` is a real thing to

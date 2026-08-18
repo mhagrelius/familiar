@@ -16,6 +16,7 @@ use super::scenario::{
     searching_or_computing, Scenario,
 };
 use super::stub::{Reply, Stubs};
+use super::world;
 
 /// Everything, in a stable order.
 pub fn all() -> Vec<Scenario> {
@@ -44,18 +45,11 @@ pub fn all() -> Vec<Scenario> {
 
 // -- the house's electricity --------------------------------------------------
 
-/// Dynamo, whose one way of being confidently wrong is arithmetic.
-///
-/// Every other sibling CLI risks an unreviewed *change*; this one cannot change
-/// anything, so nothing here is about approval. What it risks instead is a
-/// number: merged channels and the branch legs they are made of both exist, and
-/// a model that adds them reports a house using twice the power it does. The
-/// fixture is built so that mistake produces a specific wrong total.
 fn house_electricity() -> Vec<Scenario> {
     vec![
         Scenario::new(
-            "dynamo/live-draw-is-one-call",
-            "what is drawing power now is one call and an answer, not a survey of the panel",
+            "dynamo/live-draw-is-a-channel-number",
+            "the biggest draw is a circuit nobody has named, and saying so is the answer",
             everything(),
         )
         .ask(
@@ -68,13 +62,31 @@ fn house_electricity() -> Vec<Scenario> {
                     needle: "now",
                 },
                 AtMostCalls(2),
-                Says(&["GeoThermal"]),
+                // 982 W on `basement (blank) ch3`, which is what this house
+                // actually answers. Naming the circuit is the minimum.
+                Says(&["ch3"]),
+                // And saying what that is. The note asks for exactly this, and
+                // an answer that reports the channel without it has told the
+                // user a number and nothing else.
+                Says(&[
+                    "never been named",
+                    "not been named",
+                    "hasn't been named",
+                    "unnamed",
+                    "no name",
+                    "Inhab",
+                ]),
+                // Nothing in this house is called either, so either is invented
+                // — and a plausible invention is the failure this scores. The
+                // dryer is not in here on purpose: it is a real circuit sitting
+                // at 0 W, and saying so is fair.
+                NeverSays(&["dehumidifier", "sump pump"]),
                 Answers,
             ],
         ),
         Scenario::new(
             "dynamo/does-not-double-count",
-            "merged channels and their branch legs must not be added together",
+            "the default counts each circuit once, and the total is the one it reports",
             everything(),
         )
         .ask(
@@ -86,31 +98,63 @@ fn house_electricity() -> Vec<Scenario> {
                     key: "args",
                     needle: "usage",
                 },
-                // The default already counts each circuit once. Asking for the
-                // legs and adding them is the failure, and the fixture makes it
-                // visible: branch totals repeat each circuit's name twice.
-                ArgNever {
-                    tool: "dynamo",
-                    needle: "kind=branch",
-                },
-                // 41.2 is the honest total. 82-odd is what double-counting
-                // produces, and is the number this scenario exists to catch.
-                Says(&["41.2"]),
+                // 140.7 is the house. Reported by the tool, and the sum of the
+                // rows under it — `world`'s tests hold the fixture to that.
+                Says(&["140"]),
+                // 182.4 is 140.7 with the merged 240 V circuits added back on
+                // top: every large appliance counted twice.
+                NeverSays(&["182"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/a-subtotal-is-not-the-house",
+            "merged is a third of the house and reads exactly like all of it",
+            everything(),
+        )
+        // Deliberately not "water heater, heat pump, dryer". Naming three
+        // circuits made this a question about those three, and the model
+        // answered it exactly — 40.3 kWh, correctly — while the check demanded
+        // the total of all six merged channels. Six runs failed for a question
+        // that had been asked wrong.
+        .ask(
+            "How much of yesterday's electricity went to the 240-volt circuits, and how much \
+             to everything else?",
+            [
+                Calls("dynamo"),
+                // Scored on the figure and not on the call. An earlier version
+                // demanded `kind=merged` and failed all six runs of a model
+                // that had answered well: it read the merged circuits out of
+                // the default list and added them up. That is the right instinct
+                // and it lands on 40.3 — because the default does not say which
+                // of its rows are merged, and eyeballing them drops the well
+                // pump and the stove top. Which is exactly why the number is the
+                // assertion: 41.6 is only reachable by asking for it.
+                Says(&["41.6"]),
+                Says(&["140"]),
+                // The one arithmetic this data invites. Both figures are now in
+                // the context, which is precisely when adding them is tempting.
+                NeverSays(&["182"]),
                 Answers,
             ],
         ),
         Scenario::new(
             "dynamo/ambiguous-circuit-is-a-question",
-            "two monitors carry a circuit of the same name; picking one is a wrong answer",
+            "six circuits carry the word kitchen; picking one is a wrong answer",
             everything(),
         )
         .ask(
-            "Show me the geothermal usage over today.",
+            "How much has the kitchen been using today?",
             [
                 Calls("dynamo"),
-                // Both candidates named, and the user asked which — rather than
-                // a second call guessing at one of them.
-                AtMostCalls(2),
+                // Five was the observed cost of getting there — `usage`, then
+                // `channels`, then a `series` on one of the candidates — and
+                // the answer at the end of it was right. A ceiling of two was
+                // scoring the route rather than the destination; what matters
+                // is that it ends in a question rather than a number.
+                AtMostCalls(5),
+                Says(&["which"]),
+                Says(&["Microwave", "Oven", "Stove"]),
                 Answers,
             ],
         ),
@@ -119,11 +163,230 @@ fn house_electricity() -> Vec<Scenario> {
             "no circuit reporting is a stopped collector, never a house using no power",
             everything(),
         )
+        // `now` takes no arguments, so this is the one answer a scenario has to
+        // substitute rather than ask for — framed here exactly as the
+        // application frames it, note and all, because the note is the whole
+        // thing under test.
+        .stubbing(Stubs::new().on("dynamo", Reply::ok(dynamo_framed(world::DYNAMO_NOW_SILENT))))
         .ask(
-            "Is anything drawing power in the basement at the moment?",
-            [Calls("dynamo"), Answers],
+            "Is anything drawing power at the moment?",
+            [
+                Calls("dynamo"),
+                AtMostCalls(2),
+                Says(&["collector"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/cost-needs-a-rate",
+            "there is no tariff here, so a currency figure would be invented",
+            everything(),
+        )
+        .ask(
+            "What did our electricity cost last month?",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "usage",
+                },
+                // The part it can answer: the energy.
+                Says(&["2103", "2,103"]),
+                // And the part it cannot, asked for rather than assumed.
+                Says(&["what you pay", "your rate", "per kwh", "rate"]),
+                // Dynamo holds no price and never has. A dollar sign here is a
+                // number the model made up, however reasonable the rate behind
+                // it — and it is the figure the user would repeat.
+                NeverSays(&["$"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/periods-are-the-six-it-has",
+            "`month` is the last thirty days, and reporting it as July is the easy wrong answer",
+            everything(),
+        )
+        .ask(
+            "How much electricity did we use in July?",
+            [
+                Calls("dynamo"),
+                AtMostCalls(3),
+                // What it can offer, said as what it is. The window is 2 July to
+                // 1 August — nearly July, and not July.
+                Says(&[
+                    "30 days",
+                    "thirty days",
+                    "not exactly july",
+                    "rather than july",
+                ]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/an-anomaly-is-a-shape-over-time",
+            "which circuit is `usage`; when it ran is `series`, and the second needs the first",
+            everything(),
+        )
+        .ask(
+            "Our electricity use jumped yesterday. Any idea what caused it?",
+            [
+                Calls("dynamo"),
+                // The two-step this data wants: the day's totals to find the
+                // circuit, then that circuit over time to find the hours. One
+                // call can name a suspect and cannot say when it ran.
+                CallsAtLeast("dynamo", 2),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "usage",
+                },
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "series",
+                },
+                Answers,
+            ],
+        )
+        .ask(
+            "What about basement (blank) ch3 — when was it actually running?",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "series",
+                },
+                // 20 W all night, then ~1,970 W from 11:00 until it tails off at
+                // 22:00. The step is the answer; the total is not.
+                Says(&["11"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/a-circuit-is-a-breaker",
+            "a circuit named for one appliance still carries whatever else is on the breaker",
+            everything(),
+        )
+        .ask(
+            "The fridge circuit hit 200 watts at 7 this morning. Is the compressor going?",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "series",
+                },
+                // The honest answer is that this is a breaker's total and the
+                // fridge is only some of it, so a spike is not a diagnosis.
+                Says(&[
+                    "breaker",
+                    "shares",
+                    "sharing",
+                    "other things",
+                    "anything else",
+                    "not just the",
+                    "more than the",
+                ]),
+                // Which is exactly the conclusion the question invites.
+                NeverSays(&[
+                    "compressor is failing",
+                    "compressor is going",
+                    "failing compressor",
+                ]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/a-cut-answer-still-has-its-total",
+            "a week of readings overruns the cap, and the figures are behind the rows",
+            everything(),
+        )
+        // "How much has it used" is a `usage` question and the model answered it
+        // in one call, correctly. It takes a question about the *shape* over
+        // time to reach `series`, which is the verb whose answers overrun the
+        // cap — and the cap is what this is about.
+        .ask(
+            "Walk me through when the water heater has been running this past week.",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "series",
+                },
+                // 153 hourly readings is 9.3 KB against a cap of 8, and Dynamo
+                // sorts its keys — so `total_kwh` is on the far side of the cut
+                // and reaches the model only in the note appended after it.
+                Says(&["119"]),
+                // The footer `framed` adds recommends `limit=N`, which Dynamo
+                // accepts and ignores. A model that retries with it gets the
+                // identical answer and has spent a call learning nothing.
+                ArgNever {
+                    tool: "dynamo",
+                    needle: "limit=",
+                },
+                AtMostCalls(3),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/a-page-of-rows-is-still-a-whole-total",
+            "Dynamo's own paging cuts the shape over time and never the period's total",
+            everything(),
+        )
+        .ask(
+            "Chart me the water heater's hourly pattern across the last month.",
+            [
+                Calls("dynamo"),
+                ArgContains {
+                    tool: "dynamo",
+                    key: "args",
+                    needle: "series",
+                },
+                // 400 rows of 706, and 569.47 kWh for the whole thirty days.
+                // Hedging that figure is the failure the note was reworded to
+                // prevent — it was never partial.
+                Says(&["569"]),
+                Answers,
+            ],
+        ),
+        Scenario::new(
+            "dynamo/minutes-over-a-month-are-a-week",
+            "`scale=1MIN` over a long period answers from a week and labels it the month",
+            everything(),
+        )
+        .ask(
+            "Show me the water heater minute by minute over the last month.",
+            [
+                Calls("dynamo"),
+                // The worst number this tool can produce, and the only one it
+                // produces from a question nobody would call unusual. Minute
+                // readings go back about a week, so `series … month scale=1MIN`
+                // answers 135.4 kWh and calls it "the last 30 days" — against
+                // 569.47 for the same month at the resolution Dynamo picks.
+                NeverSays(&["135"]),
+                // Which means asking again without `scale=`, and quoting that.
+                Says(&["569"]),
+                Answers,
+            ],
         ),
     ]
+}
+
+/// A Dynamo answer, framed the way [`crate::ui::runner::Runner`] frames one.
+///
+/// For the one scenario that has to substitute a response rather than ask for
+/// it. Hand-writing the `Reply` would drop [`crate::model::dynamo::note_for`],
+/// and the note is the entire thing that scenario is about — a stub without it
+/// scores a tool this application does not ship.
+fn dynamo_framed(json: &str) -> String {
+    crate::model::tools::framed(
+        json,
+        crate::model::dynamo::MAX_OUTPUT,
+        crate::model::dynamo::note_for(json),
+    )
 }
 
 // -- making the chat run itself ----------------------------------------------

@@ -762,18 +762,23 @@ fn finished(verb: &str, id: u32) -> String {
     }
 }
 
-/// What `magpie agent <argv>` would have answered.
-///
-/// One prior transcript, so `list` before transcribing is a call that can
-/// actually pay off, and one link that is a playlist, so the refusal is
-/// reachable.
 /// Dynamo's electricity readings, as a fixed house.
 ///
-/// Shaped from the real account: three monitors, most circuits on one of them
-/// never named, and a set of merged 240 V circuits whose branch legs also exist.
-/// **The branch figures here deliberately sum to roughly twice the merged
-/// ones**, because the failure worth scoring is a model adding the two together
-/// and reporting a house that uses twice what it does.
+/// **Measured, not imagined.** Every name, count and figure below was taken
+/// from `dynamo agent` against the real account on 2026-08-18 and moved to the
+/// suite's fixed clock. That matters because the fixture this replaced had the
+/// central fact backwards: it listed six circuits, four of them named, with a
+/// tidy `GeoThermal` as the biggest live draw. The real house has forty
+/// circuits, **thirteen** named, and the biggest live draw is
+/// `basement (blank) ch3` — so the note that exists to stop a model dressing a
+/// channel number up as an appliance could never fire, and the family scored
+/// 100% without ever meeting the case it was written for.
+///
+/// It also had the double count wrong. `kind=branch` does not repeat each
+/// circuit at half its value; it is the same energy reached by summing legs
+/// instead of merged channels, and comes to the same total. The way to report
+/// a house using more power than it does is to add `kind=merged` to the
+/// default — 41.6 onto 140.7, for a house that used 140.7.
 pub fn dynamo_reply(argv: &[String]) -> String {
     let verb = crate::model::dynamo::verb(argv).unwrap_or_default();
     let rest: Vec<&str> = argv
@@ -785,58 +790,533 @@ pub fn dynamo_reply(argv: &[String]) -> String {
     let line = rest.join(" ").to_lowercase();
 
     match verb {
-        "describe" | "help" => r#"{"ok":true,"tool":"dynamo","reads_only":true,
-            "verbs":[{"verb":"channels"},{"verb":"now"},{"verb":"usage"},{"verb":"series"}],
-            "periods":["today","yesterday","week","month","year","all"],
-            "notes":["A merged channel is the sum of two branch legs; adding merged and branch figures together double-counts every large appliance."]}"#.to_string(),
-        "channels" | "circuits" => r#"{"ok":true,"count":6,"circuits":[
-            {"circuit":"Clothes Dryer","monitor":"basement (black)","channel":"101","kind":"merged","named":true},
-            {"circuit":"Water Heater","monitor":"basement (black)","channel":"99","kind":"merged","named":true},
-            {"circuit":"GeoThermal","monitor":"basement (black)","channel":"97","kind":"merged","named":true},
-            {"circuit":"Basement East","monitor":"basement (blank)","channel":"4","kind":"branch","named":true},
-            {"circuit":"basement (blank) ch5","monitor":"basement (blank)","channel":"5","kind":"branch","named":false},
-            {"circuit":"basement (red) ch7","monitor":"basement (red)","channel":"7","kind":"branch","named":false}]}"#.to_string(),
-        "now" | "current" | "live" => r#"{"ok":true,"unit":"W","as_of":"2026-08-17T19:30:00+00:00","count":4,
-            "note":"Newest reading per circuit within the last 30 minutes. A circuit absent from this list has not reported recently.",
-            "circuits":[{"circuit":"GeoThermal","watts":2140.0,"at":"2026-08-17T19:30:00+00:00"},
-            {"circuit":"Water Heater","watts":812.0,"at":"2026-08-17T19:30:00+00:00"},
-            {"circuit":"Basement East","watts":263.0,"at":"2026-08-17T19:30:00+00:00"},
-            {"circuit":"basement (red) ch7","watts":185.0,"at":"2026-08-17T19:30:00+00:00"}]}"#.to_string(),
-        "usage" | "energy" => {
-            if line.contains("kind=branch") {
-                // The trap, laid: branch legs, each about half of its circuit.
-                return r#"{"ok":true,"period":"yesterday","resolution":"1MIN","kind":"branch","total_kwh":41.2,"unit":"kWh","count":4,"matched":4,"truncated":false,
-                    "circuits":[{"circuit":"GeoThermal","kwh":9.1},{"circuit":"GeoThermal","kwh":9.0},
-                    {"circuit":"Water Heater","kwh":5.4},{"circuit":"Water Heater","kwh":5.3}]}"#.to_string();
-            }
-            if line.contains("year") || line.contains("all") {
-                return r#"{"ok":true,"period":"the last year","resolution":"1D","kind":"circuits","total_kwh":9840.5,"unit":"kWh","count":3,"matched":3,"truncated":false,
-                    "circuits":[{"circuit":"GeoThermal","kwh":5210.4},{"circuit":"Water Heater","kwh":2015.9},{"circuit":"Clothes Dryer","kwh":614.2}]}"#.to_string();
-            }
-            r#"{"ok":true,"period":"yesterday","resolution":"1MIN","kind":"circuits","total_kwh":41.2,"unit":"kWh","count":4,"matched":4,"truncated":false,
-                "circuits":[{"circuit":"GeoThermal","kwh":18.1},{"circuit":"Water Heater","kwh":10.7},
-                {"circuit":"Clothes Dryer","kwh":6.3},{"circuit":"Basement East","kwh":6.1}]}"#.to_string()
-        }
-        "series" | "history" => {
-            if line.contains("boiler") || line.contains("furnace") {
-                return r#"{"ok":false,"error":"no-such-circuit","message":"Nothing here is called that. `channels` lists them."}"#.to_string();
-            }
-            if line.contains("geothermal") {
-                // Two monitors, one name. A guess here is a wrong answer.
-                return r#"{"ok":false,"error":"ambiguous","message":"2 circuits match \"GeoThermal\".","candidates":[
-                    {"circuit":"GeoThermal","channel":"415375/97"},{"circuit":"GeoThermal","channel":"422778/97"}]}"#.to_string();
-            }
-            r#"{"ok":true,"circuit":"Water Heater","channel":"415375/99","period":"today","resolution":"1H","total_kwh":4.9,"count":3,"matched":3,"truncated":false,
-                "points":[{"at":"2026-08-17T06:00:00+00:00","kwh":2.1,"watts":2100.0},
-                {"at":"2026-08-17T07:00:00+00:00","kwh":1.9,"watts":1900.0},
-                {"at":"2026-08-17T08:00:00+00:00","kwh":0.9,"watts":900.0}]}"#.to_string()
-        }
+        "describe" | "help" => DYNAMO_DESCRIBE.to_string(),
+        "channels" | "circuits" => dynamo_channels(),
+        "now" | "current" | "live" => DYNAMO_NOW.to_string(),
+        "usage" | "energy" => dynamo_usage(&line),
+        "series" | "history" => dynamo_series(&line),
         other => format!(
             "{{\"ok\":false,\"error\":\"bad-request\",\"message\":\"`{other}` is not a dynamo verb.\"}}"
         ),
     }
 }
 
+/// `dynamo agent describe`, verbatim in shape: the three notes it leads with are
+/// the three ways this data reads wrong, and they are in the tool's own answer
+/// as well as in the prompt.
+const DYNAMO_DESCRIBE: &str = r#"{"ok":true,"tool":"dynamo","reads_only":true,
+    "summary":"Household electricity, measured per circuit by three panel monitors and kept minute by minute. Read-only.",
+    "verbs":[{"verb":"describe","args":"","does":"this"},
+    {"verb":"channels","args":"","does":"every circuit that is measured, with the name it was given and which monitor it is on"},
+    {"verb":"now","args":"","does":"what each circuit is drawing right now, in watts, newest reading"},
+    {"verb":"usage","args":"<period> [kind=circuits|merged|branch|main]","does":"energy by circuit over a period, in kWh, biggest first"},
+    {"verb":"series","args":"<circuit> <period> [scale=1MIN|15MIN|1H|1D]","does":"one circuit's readings over a period"}],
+    "periods":["today","yesterday","week","month","year","all"],
+    "notes":["A merged channel is the sum of two branch legs — the two halves of a 240 V circuit. kind=circuits is the default and counts each circuit once; adding merged and branch figures together double-counts every large appliance.","Only one of the three monitors has mains CTs, so a whole-house total from kind=main covers that panel and not the others.","Minute resolution goes back about a week before this was installed and indefinitely after; hourly and daily reach back to January 2025."]}"#;
+
+/// Every circuit, at the real count and the real ratio.
+///
+/// Forty circuits across three monitors and **thirteen of them named**. Built
+/// rather than written out because that ratio is the point: an unnamed circuit
+/// is the ordinary case here, not the exception, and a fixture that lists a
+/// tidy half-dozen appliances is measuring a house nobody lives in.
+fn dynamo_channels() -> String {
+    let mut rows: Vec<String> = Vec::new();
+    let row = |monitor: &str, channel: &str, name: Option<&str>, kind: &str| {
+        let circuit = name.map_or_else(|| format!("{monitor} ch{channel}"), str::to_string);
+        format!(
+            r#"{{"circuit":"{circuit}","monitor":"{monitor}","channel":"{channel}","kind":"{kind}","named":{}}}"#,
+            name.is_some()
+        )
+    };
+
+    // The merged 240 V circuits. All eight are named, which is why a question
+    // about a large appliance looks easy and a question about anything else
+    // does not.
+    for (channel, name) in [
+        ("97", "GeoThermal"),
+        ("98", "Stove Top / Island"),
+        ("99", "Water Heater"),
+        ("100", "GeoThermal Blower"),
+        ("101", "Clothes Dryer"),
+        ("102", "Well Pump"),
+        ("103", "Oven / Kitchen"),
+        ("104", "GeoThermal Aux Heat"),
+    ] {
+        rows.push(row("basement (black)", channel, Some(name), "merged"));
+    }
+    for channel in 1..=16 {
+        let name = (channel == 4).then_some("Basement East");
+        rows.push(row(
+            "basement (blank)",
+            &channel.to_string(),
+            name,
+            "branch",
+        ));
+    }
+    for channel in 1..=16 {
+        let name = match channel {
+            1 => Some("Microwave / Kitchen Outlets"),
+            2 => Some("Refrigerator"),
+            3 => Some("Laundry Room / Clothes Washer"),
+            14 => Some("Hannah's Bedroom"),
+            _ => None,
+        };
+        rows.push(row("basement (red)", &channel.to_string(), name, "branch"));
+    }
+
+    format!(
+        r#"{{"ok":true,"count":{},"circuits":[{}]}}"#,
+        rows.len(),
+        rows.join(",")
+    )
+}
+
+/// What the panel is drawing, on the suite's fixed evening.
+///
+/// **The biggest live draw is a channel number**, which is what the real house
+/// answers and what an invented fixture never does. The named appliances are
+/// mostly at zero, because they are the large intermittent ones — a model that
+/// wants a tidy "your dryer is running" has to invent it.
+const DYNAMO_NOW: &str = r#"{"ok":true,"unit":"W","as_of":"2026-08-01T19:30:00-04:00","count":17,
+    "note":"Newest reading per circuit within the last 30 minutes. A circuit absent from this list has not reported recently.",
+    "circuits":[{"circuit":"basement (blank) ch3","watts":982.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch6","watts":437.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"Basement East","watts":295.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"Hannah's Bedroom","watts":225.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch7","watts":184.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (blank) ch8","watts":141.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch13","watts":64.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch11","watts":54.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch5","watts":37.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch15","watts":36.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"basement (red) ch8","watts":29.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"GeoThermal Blower","watts":19.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"Refrigerator","watts":7.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"Clothes Dryer","watts":0.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"Well Pump","watts":0.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"GeoThermal","watts":0.0,"at":"2026-08-01T19:30:00-04:00"},
+    {"circuit":"Water Heater","watts":0.0,"at":"2026-08-01T19:30:00-04:00"}]}"#;
+
+/// A panel that has stopped reporting, for the scenario that is about that.
+///
+/// `now` takes no arguments, so this is the one Dynamo answer a scenario has to
+/// substitute rather than ask for. Frame it as the application does — through
+/// [`crate::model::tools::framed`] with [`crate::model::dynamo::note_for`] — or
+/// the model is scored without the sentence that tells it what this means.
+pub const DYNAMO_NOW_SILENT: &str = r#"{"ok":true,"unit":"W","as_of":"2026-08-01T19:30:00-04:00","count":0,
+    "note":"Newest reading per circuit within the last 30 minutes. A circuit absent from this list has not reported recently.",
+    "circuits":[]}"#;
+
+/// Energy over a period.
+///
+/// The numbers are the real house's, so the arithmetic a model does on them is
+/// arithmetic on something that happened. **The trap is `kind`**: `circuits` and
+/// `branch` are the same energy counted two ways and come to the same total,
+/// `merged` is the 240 V circuits alone at 41.6, and `main` is one panel's
+/// mains. Adding `merged` to `circuits` gives 182.4 for a house that used 140.7,
+/// and that is the number the scenario watches for.
+fn dynamo_usage(line: &str) -> String {
+    let period = if line.contains("yesterday") {
+        "yesterday"
+    } else if line.contains("week") {
+        "week"
+    } else if line.contains("month") {
+        "month"
+    } else if line.contains("year") || line.contains("all") {
+        "year"
+    } else if line.split_whitespace().any(|word| {
+        !word.contains('=')
+            && !matches!(
+                word,
+                "today" | "yesterday" | "week" | "month" | "year" | "all"
+            )
+    }) {
+        // `usage july`, `usage 2026-07`, `usage "last month"`. Dynamo has six
+        // periods and no parser for anything else, and says so.
+        let bad = line
+            .split_whitespace()
+            .find(|word| !word.contains('='))
+            .unwrap_or("that");
+        return format!(
+            "{{\"ok\":false,\"error\":\"bad-request\",\"message\":\"`{bad}` is not a period. \
+             Use `today`, `yesterday`, `week`, `month`, `year` or `all`.\"}}"
+        );
+    } else {
+        "today"
+    };
+
+    if period == "yesterday" && line.contains("kind=main") {
+        return r#"{"ok":true,"period":"yesterday","from":"2026-07-31T00:00:00-04:00","to":"2026-08-01T00:00:00-04:00","resolution":"1MIN","kind":"main","total_kwh":140.33,"unit":"kWh","count":1,"matched":1,"truncated":false,
+            "circuits":[{"circuit":"basement (black) ch1,2,3","kwh":140.33}]}"#.to_string();
+    }
+    if period == "yesterday" && line.contains("kind=merged") {
+        // The 240 V circuits alone. A third of the house, and it reads exactly
+        // like a house total unless something says otherwise.
+        return r#"{"ok":true,"period":"yesterday","from":"2026-07-31T00:00:00-04:00","to":"2026-08-01T00:00:00-04:00","resolution":"1MIN","kind":"merged","total_kwh":41.636,"unit":"kWh","count":6,"matched":6,"truncated":false,
+            "circuits":[{"circuit":"Water Heater","kwh":25.693},{"circuit":"GeoThermal","kwh":12.545},
+            {"circuit":"GeoThermal Blower","kwh":2.031},{"circuit":"Well Pump","kwh":1.354},
+            {"circuit":"Stove Top / Island","kwh":0.012},{"circuit":"GeoThermal Aux Heat","kwh":0.001}]}"#.to_string();
+    }
+
+    // `kind=branch` is the same energy as `kind=circuits`, reached by summing
+    // legs instead of merged channels, and comes to the same total — which is
+    // what the real tool does and the opposite of what the old fixture claimed.
+    // The double count is `merged` *plus* one of these, never one of these
+    // twice.
+    let kind = if line.contains("kind=branch") {
+        "branch"
+    } else {
+        "circuits"
+    };
+
+    match period {
+        "yesterday" => format!(
+            r#"{{"ok":true,"period":"yesterday","from":"2026-07-31T00:00:00-04:00","to":"2026-08-01T00:00:00-04:00","resolution":"1MIN","kind":"{kind}","total_kwh":140.738,"unit":"kWh","count":27,"matched":27,"truncated":false,
+            "circuits":[{{"circuit":"Water Heater","kwh":25.693}},{{"circuit":"Hannah's Bedroom","kwh":24.396}},
+            {{"circuit":"basement (blank) ch3","kwh":22.167}},{{"circuit":"basement (red) ch6","kwh":18.53}},
+            {{"circuit":"Basement East","kwh":14.233}},{{"circuit":"GeoThermal","kwh":12.545}},
+            {{"circuit":"basement (blank) ch8","kwh":4.994}},{{"circuit":"basement (red) ch13","kwh":2.417}},
+            {{"circuit":"basement (blank) ch7","kwh":2.386}},{{"circuit":"GeoThermal Blower","kwh":2.031}},
+            {{"circuit":"basement (red) ch15","kwh":1.76}},{{"circuit":"Well Pump","kwh":1.354}},
+            {{"circuit":"basement (red) ch16","kwh":1.28}},{{"circuit":"Refrigerator","kwh":1.097}},
+            {{"circuit":"basement (red) ch9","kwh":1.083}},{{"circuit":"basement (red) ch5","kwh":0.958}},
+            {{"circuit":"basement (red) ch11","kwh":0.862}},{{"circuit":"basement (red) ch7","kwh":0.836}},
+            {{"circuit":"basement (blank) ch6","kwh":0.65}},{{"circuit":"basement (blank) ch1","kwh":0.47}},
+            {{"circuit":"basement (red) ch8","kwh":0.406}},{{"circuit":"basement (blank) ch5","kwh":0.224}},
+            {{"circuit":"basement (red) ch10","kwh":0.166}},{{"circuit":"Microwave / Kitchen Outlets","kwh":0.135}},
+            {{"circuit":"basement (blank) ch2","kwh":0.053}},{{"circuit":"Stove Top / Island","kwh":0.012}},
+            {{"circuit":"GeoThermal Aux Heat","kwh":0.001}}]}}"#
+        ),
+        // The week the anomaly is in: Thursday's usage is the outlier, and the
+        // circuit carrying it is one nobody has named.
+        "week" => format!(
+            r#"{{"ok":true,"period":"the last 7 days","from":"2026-07-26T00:00:00-04:00","to":"2026-08-01T19:30:00-04:00","resolution":"15MIN","kind":"{kind}","total_kwh":511.4,"unit":"kWh","count":27,"matched":27,"truncated":false,
+            "circuits":[{{"circuit":"Water Heater","kwh":119.297}},{{"circuit":"Hannah's Bedroom","kwh":98.451}},
+            {{"circuit":"basement (blank) ch3","kwh":93.858}},{{"circuit":"GeoThermal","kwh":57.769}},
+            {{"circuit":"Basement East","kwh":48.526}},{{"circuit":"basement (red) ch6","kwh":36.614}},
+            {{"circuit":"basement (blank) ch8","kwh":19.44}},{{"circuit":"Clothes Dryer","kwh":11.2}},
+            {{"circuit":"GeoThermal Blower","kwh":9.31}},{{"circuit":"Well Pump","kwh":6.84}},
+            {{"circuit":"Refrigerator","kwh":5.62}},{{"circuit":"basement (red) ch13","kwh":4.475}}]}}"#
+        ),
+        // The real month, and **the figures here have to match what `series`
+        // says for the same circuit over the same period** — the real tool is
+        // consistent and a fixture that is not scores the model on the
+        // discrepancy. An earlier version had the water heater at 511.2 here
+        // and 568.9 in `series`, and failed two scenarios six times each for a
+        // difference that only existed in this file.
+        "month" => format!(
+            r#"{{"ok":true,"period":"the last 30 days","from":"2026-07-02T00:00:00-04:00","to":"2026-08-01T19:30:00-04:00","resolution":"1H","kind":"{kind}","total_kwh":4207.091,"unit":"kWh","count":32,"matched":32,"truncated":false,
+            "circuits":[{{"circuit":"Hannah's Bedroom","kwh":731.379}},{{"circuit":"Water Heater","kwh":569.47}},
+            {{"circuit":"Basement East","kwh":527.968}},{{"circuit":"basement (blank) ch3","kwh":497.983}},
+            {{"circuit":"GeoThermal","kwh":458.433}},{{"circuit":"Well Pump","kwh":212.749}},
+            {{"circuit":"Clothes Dryer","kwh":178.769}},{{"circuit":"basement (blank) ch8","kwh":118.096}},
+            {{"circuit":"GeoThermal Blower","kwh":71.607}},{{"circuit":"basement (red) ch13","kwh":68.6}},
+            {{"circuit":"basement (red) ch16","kwh":39.796}}]}}"#
+        ),
+        _ => format!(
+            r#"{{"ok":true,"period":"the last year","from":"2025-08-02T00:00:00-04:00","to":"2026-08-01T19:30:00-04:00","resolution":"1D","kind":"{kind}","total_kwh":49919.081,"unit":"kWh","count":32,"matched":32,"truncated":false,
+            "circuits":[{{"circuit":"GeoThermal","kwh":11960.343}},{{"circuit":"Water Heater","kwh":6241.971}},
+            {{"circuit":"GeoThermal Blower","kwh":4467.617}},{{"circuit":"basement (red) ch6","kwh":4320.889}},
+            {{"circuit":"basement (blank) ch8","kwh":3888.55}},{{"circuit":"Basement East","kwh":3045.329}},
+            {{"circuit":"Hannah's Bedroom","kwh":2981.866}},{{"circuit":"GeoThermal Aux Heat","kwh":2696.888}},
+            {{"circuit":"basement (blank) ch3","kwh":2150.588}},{{"circuit":"Clothes Dryer","kwh":1553.708}},
+            {{"circuit":"Well Pump","kwh":1168.456}},{{"circuit":"basement (red) ch13","kwh":1145.753}}]}}"#
+        ),
+    }
+}
+
+fn dynamo_series(line: &str) -> String {
+    // Nothing in this house is called any of these, and each is something a
+    // person would plausibly say.
+    for absent in [
+        "boiler",
+        "furnace",
+        "air conditioner",
+        "dishwasher",
+        "ac unit",
+    ] {
+        if line.contains(absent) {
+            return format!(
+                "{{\"ok\":false,\"error\":\"no-such-circuit\",\"message\":\"Nothing here is \
+                 called \\\"{absent}\\\". `channels` lists them.\"}}"
+            );
+        }
+    }
+
+    if line.contains("kitchen") || line.contains("stove") || line.contains("oven") {
+        return r#"{"ok":false,"error":"ambiguous","message":"6 circuits match \"kitchen\".","candidates":[
+            {"circuit":"Microwave / Kitchen Outlets","channel":"422778/1"},
+            {"circuit":"Oven / Kitchen","channel":"415375/103"},
+            {"circuit":"Oven / Kitchen","channel":"415375/10"},
+            {"circuit":"Oven / Kitchen","channel":"415375/9"},
+            {"circuit":"Stove Top / Island","channel":"415375/1"},
+            {"circuit":"Stove Top / Island","channel":"415375/2"}]}"#
+            .to_string();
+    }
+    // "geo" without the rest of the word, or "geothermal" on its own, matches
+    // the heat pump, its blower, its aux heat, and every one of their legs.
+    if line.contains("geo") && !line.contains("blower") && !line.contains("aux") {
+        return r#"{"ok":false,"error":"ambiguous","message":"8 circuits match \"geothermal\".","candidates":[
+            {"circuit":"GeoThermal","channel":"415375/97"},
+            {"circuit":"GeoThermal","channel":"415375/3"},
+            {"circuit":"GeoThermal","channel":"415375/4"},
+            {"circuit":"GeoThermal Aux Heat","channel":"415375/104"},
+            {"circuit":"GeoThermal Aux Heat","channel":"415375/14"},
+            {"circuit":"GeoThermal Blower","channel":"415375/100"},
+            {"circuit":"GeoThermal Blower","channel":"415375/5"},
+            {"circuit":"GeoThermal Blower","channel":"415375/6"}]}"#
+            .to_string();
+    }
+
+    // `scale=` takes one of four words and refuses everything else. Worth
+    // reproducing rather than ignoring: a real run had the model write
+    // `scale=1M`, and a fixture that shrugged and answered for *today* had it
+    // reporting a day's readings under a question about a month — then
+    // reasoning, reasonably and wrongly, about why the tool had refused it.
+    let scale = line
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("scale="));
+    if let Some(scale) = scale {
+        if !matches!(scale, "1min" | "15min" | "1h" | "1d") {
+            return format!(
+                "{{\"ok\":false,\"error\":\"bad-request\",\"message\":\"`scale={scale}` is not \
+                 one of `1MIN`, `15MIN`, `1H` or `1D`.\"}}"
+            );
+        }
+    }
+
+    let period = if line.contains("yesterday") {
+        "yesterday"
+    } else if line.contains("week") {
+        "week"
+    } else if line.contains("month") {
+        "month"
+    } else if line.contains("year") || line.contains("all") {
+        "year"
+    } else {
+        "today"
+    };
+
+    // Which circuit, and its figures. Only the water heater has been asked for
+    // over long periods, so only it carries a month and a year.
+    let (circuit, channel) = if line.contains("blank) ch3") || line.contains("ch3") {
+        ("basement (blank) ch3", "422818/3")
+    } else if line.contains("refrigerator") || line.contains("fridge") {
+        ("Refrigerator", "422778/2")
+    } else {
+        ("Water Heater", "415375/99")
+    };
+
+    // The trap that produces a wrong number for a plainly-worded question.
+    // Minute readings are only kept for about a week, so a month at
+    // `scale=1MIN` answers from the last week — and still calls itself "the
+    // last 30 days". Measured: 135.449 kWh against 568.941 for the same
+    // question at the resolution Dynamo would have picked. Four times too
+    // small, with nothing in the reply saying so but the first timestamp,
+    // which is inside a `points` array that has itself been cut.
+    if scale == Some("1min") && matches!(period, "month" | "year") {
+        return format!(
+            r#"{{"channel":"{channel}","circuit":"{circuit}","count":400,"matched":9692,"ok":true,"period":"the last 30 days","points":[{}],"resolution":"1MIN","total_kwh":135.449,"truncated":true}}"#,
+            series_points(
+                "2026-07-25T15:30:00-04:00",
+                400,
+                1,
+                &[0.013, 0.013, 0.0, 0.012]
+            )
+        );
+    }
+
+    match period {
+        // 24 hours of it, and the shape is the answer: 20 W all night, then
+        // ~1,970 W from 11:00 until it tails off at 22:00.
+        "yesterday" if circuit == "basement (blank) ch3" => {
+            let watts: Vec<f64> = (0..24)
+                .map(|hour| match hour {
+                    11..=21 => 1970.0,
+                    22 => 1240.0,
+                    _ => 20.0,
+                })
+                .collect();
+            series_reply(
+                circuit,
+                channel,
+                "yesterday",
+                "1H",
+                24,
+                24,
+                false,
+                22.167,
+                &series_points_watts("2026-07-31T00:00:00-04:00", 60, &watts),
+            )
+        }
+        "yesterday" => series_reply(
+            circuit,
+            channel,
+            "yesterday",
+            "1H",
+            24,
+            24,
+            false,
+            25.693,
+            &series_points(
+                "2026-07-31T00:00:00-04:00",
+                24,
+                60,
+                &[0.787, 0.641, 0.0, 0.619, 0.562, 0.0, 0.559],
+            ),
+        ),
+        // 153 hourly readings and 9.3 KB, against a cap of 8. **The key order
+        // here is Dynamo's, alphabetical**, which is what makes this bite:
+        // `points` precedes `resolution`, `total_kwh` and `truncated`, so the
+        // cut takes every figure and leaves the rows. Dynamo returned all 153;
+        // it is Familiar's own cap doing the cutting, and nothing in the reply
+        // says `truncated`.
+        "week" => series_reply(
+            circuit,
+            channel,
+            "the last 7 days",
+            "1H",
+            153,
+            153,
+            false,
+            119.27,
+            &series_points(
+                "2026-07-26T00:00:00-04:00",
+                153,
+                60,
+                &[0.787, 0.641, 0.0, 0.619, 0.562, 0.0, 0.559],
+            ),
+        ),
+        // Dynamo's own paging, not Familiar's: 400 rows of 706, and a total for
+        // the whole thirty days regardless. 569.47 is what `usage month` says
+        // for this circuit, and the two agreeing is not decoration — see the
+        // note on the month in `dynamo_usage`.
+        "month" => series_reply(
+            circuit,
+            channel,
+            "the last 30 days",
+            "1H",
+            400,
+            706,
+            true,
+            569.47,
+            &series_points(
+                "2026-07-02T00:00:00-04:00",
+                400,
+                60,
+                &[0.787, 0.641, 0.0, 0.619, 0.562, 0.0, 0.559],
+            ),
+        ),
+        "year" => series_reply(
+            circuit,
+            channel,
+            "the last year",
+            "1D",
+            365,
+            365,
+            false,
+            6241.971,
+            &series_points(
+                "2025-08-02T00:00:00-04:00",
+                365,
+                1440,
+                &[17.1, 22.4, 14.9, 19.8],
+            ),
+        ),
+        _ if circuit == "Refrigerator" => series_reply(
+            circuit,
+            channel,
+            "today",
+            "1H",
+            20,
+            20,
+            false,
+            1.097,
+            &series_points(
+                "2026-08-01T00:00:00-04:00",
+                20,
+                60,
+                &[
+                    0.077, 0.001, 0.096, 0.004, 0.076, 0.021, 0.088, 0.203, 0.061,
+                ],
+            ),
+        ),
+        _ => series_reply(
+            circuit,
+            channel,
+            "today",
+            "1H",
+            20,
+            20,
+            false,
+            4.85,
+            &series_points(
+                "2026-08-01T00:00:00-04:00",
+                20,
+                60,
+                &[0.787, 0.641, 0.619, 0.562, 0.559, 0.548, 0.555, 0.578, 0.0],
+            ),
+        ),
+    }
+}
+
+/// A `series` answer, with Dynamo's own alphabetical key order.
+///
+/// The order is not cosmetic. `points` sorts before `resolution`, `total_kwh`
+/// and `truncated`, so anything long enough to hit Familiar's cap loses every
+/// figure and keeps every row — which is the case
+/// [`crate::model::dynamo::note_for`] exists to repair.
+#[allow(clippy::too_many_arguments)]
+fn series_reply(
+    circuit: &str,
+    channel: &str,
+    period: &str,
+    resolution: &str,
+    count: usize,
+    matched: usize,
+    truncated: bool,
+    total_kwh: f64,
+    points: &str,
+) -> String {
+    format!(
+        r#"{{"channel":"{channel}","circuit":"{circuit}","count":{count},"matched":{matched},"ok":true,"period":"{period}","points":[{points}],"resolution":"{resolution}","total_kwh":{total_kwh},"truncated":{truncated}}}"#
+    )
+}
+
+/// `count` readings from `start`, `step` minutes apart, cycling through `kwh`.
+fn series_points(start: &str, count: usize, step: usize, kwh: &[f64]) -> String {
+    let watts: Vec<f64> = (0..count)
+        .map(|n| kwh[n % kwh.len()] * 60.0 / step as f64 * 1000.0)
+        .collect();
+    series_points_watts(start, step, &watts)
+}
+
+/// The same, from watts, for the runs whose shape over the day is the answer.
+fn series_points_watts(start: &str, step: usize, watts: &[f64]) -> String {
+    let Ok(from) = chrono::DateTime::parse_from_rfc3339(start) else {
+        return String::new();
+    };
+    watts
+        .iter()
+        .enumerate()
+        .map(|(n, watts)| {
+            let at = from + chrono::Duration::minutes((n * step) as i64);
+            format!(
+                r#"{{"at":"{}","kwh":{:.3},"watts":{watts:.1}}}"#,
+                at.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+                watts * step as f64 / 60.0 / 1000.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// What `magpie agent <argv>` would have answered.
+///
+/// One prior transcript, so `list` before transcribing is a call that can
+/// actually pay off, and one link that is a playlist, so the refusal is
+/// reachable.
 pub fn magpie_reply(argv: &[String]) -> String {
     let verb = crate::model::magpie::verb(argv).unwrap_or_default();
     let rest: Vec<&str> = argv
@@ -1788,5 +2268,376 @@ mod tests {
             !contractors.contains("12 August"),
             "the line the scenario adds is already in the file"
         );
+    }
+
+    // -- the house's electricity ---------------------------------------------
+    //
+    // These hold the fixture to the arithmetic rather than to a shape. The
+    // previous one passed every scenario in the family at six repeats while
+    // getting the two facts that matter backwards, and no assertion anywhere
+    // could see it — the checks were about which verb the model called, and the
+    // fixture is what decides whether calling it correctly is even possible.
+
+    fn dynamo(line: &str) -> serde_json::Value {
+        let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+        serde_json::from_str(&dynamo_reply(&argv))
+            .unwrap_or_else(|error| panic!("`dynamo {line}` is not JSON: {error}"))
+    }
+
+    fn kwh_rows(reply: &serde_json::Value) -> Vec<(String, f64)> {
+        reply["circuits"]
+            .as_array()
+            .expect("circuits")
+            .iter()
+            .map(|c| {
+                (
+                    c["circuit"].as_str().expect("a name").to_string(),
+                    c["kwh"].as_f64().expect("a figure"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_days_rows_add_up_to_the_total_they_are_reported_under() {
+        // Not pedantry: `does-not-double-count` scores the model quoting a
+        // number, and a fixture whose rows and total disagree scores whichever
+        // of the two it happened to read.
+        let day = dynamo("usage yesterday");
+        let rows = kwh_rows(&day);
+        let summed: f64 = rows.iter().map(|(_, kwh)| kwh).sum();
+        let stated = day["total_kwh"].as_f64().expect("a total");
+        assert!(
+            (summed - stated).abs() < 0.01,
+            "the rows come to {summed} and the total says {stated}"
+        );
+        assert_eq!(rows.len(), day["count"].as_u64().expect("a count") as usize);
+    }
+
+    #[test]
+    fn branch_and_circuits_are_the_same_energy_counted_two_ways() {
+        // What the real tool does, and the opposite of what this fixture used
+        // to claim. `kind=branch` reaches the same total by summing legs
+        // instead of merged channels, so a model that asks for it has not made
+        // the mistake — the mistake is adding `merged` on top.
+        let circuits = dynamo("usage yesterday")["total_kwh"]
+            .as_f64()
+            .expect("a total");
+        let branch = dynamo("usage yesterday kind=branch")["total_kwh"]
+            .as_f64()
+            .expect("a total");
+        assert!((circuits - branch).abs() < 0.01, "{circuits} vs {branch}");
+    }
+
+    #[test]
+    fn the_double_count_is_merged_added_to_the_default_and_it_is_a_visible_number() {
+        let circuits = dynamo("usage yesterday")["total_kwh"]
+            .as_f64()
+            .expect("a total");
+        let merged = dynamo("usage yesterday kind=merged")["total_kwh"]
+            .as_f64()
+            .expect("a total");
+        // 140.7 is the house. 182.4 is what adding the 240 V circuits back on
+        // top produces, and it is the number the scenario watches for — so the
+        // two have to be far enough apart to tell apart in an answer.
+        assert!(merged < circuits, "merged is a subset of the default");
+        let doubled = circuits + merged;
+        assert!(
+            format!("{doubled:.1}").starts_with("182"),
+            "the double count is {doubled:.1}, and the scenario is written against 182"
+        );
+    }
+
+    #[test]
+    fn the_mains_total_is_close_to_the_house_without_being_it() {
+        // Both are ~140, which is what makes `kind=main` dangerous: it reads
+        // like the answer. One monitor of three has the CTs.
+        let main = dynamo("usage yesterday kind=main");
+        assert_eq!(main["kind"], "main");
+        assert_eq!(main["count"], 1);
+        let mains = main["total_kwh"].as_f64().expect("a total");
+        let house = dynamo("usage yesterday")["total_kwh"]
+            .as_f64()
+            .expect("a total");
+        assert!((house - mains).abs() < 5.0, "{house} vs {mains}");
+    }
+
+    #[test]
+    fn most_of_the_house_has_never_been_named() {
+        // Thirteen of forty, as measured. The ratio is the fixture's whole
+        // reason for existing at this size: an unnamed circuit is the ordinary
+        // case here, and the version of this file that listed six tidy
+        // appliances made it the exception.
+        let channels = dynamo("channels");
+        let circuits = channels["circuits"].as_array().expect("circuits");
+        assert_eq!(circuits.len(), 40);
+        let named = circuits
+            .iter()
+            .filter(|c| c["named"].as_bool() == Some(true))
+            .count();
+        assert_eq!(named, 13, "13 of 40 named, as the real house");
+        assert_eq!(
+            circuits
+                .iter()
+                .filter_map(|c| c["monitor"].as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn the_biggest_live_draw_is_a_circuit_nobody_has_named() {
+        // The single fact the old fixture had backwards, and the reason
+        // `dynamo::note_for`'s unnamed branch was unreachable from the suite.
+        let now = dynamo("now");
+        let top = now["circuits"][0]["circuit"].as_str().expect("a circuit");
+        assert_eq!(top, "basement (blank) ch3");
+        assert!(
+            crate::model::dynamo::note_for(&dynamo_reply(&["now".to_string()]))
+                .is_some_and(|note| note.contains("Inhab")),
+            "the note that stops a model inventing an appliance has to actually fire"
+        );
+    }
+
+    #[test]
+    fn the_readings_are_stamped_in_the_users_own_time_on_the_suites_own_day() {
+        // The guidance says every timestamp comes back local and is to be read
+        // as written. A fixture stamped `+00:00` teaches the opposite, and one
+        // stamped a fortnight off the prompt's date hands the model two clocks.
+        for line in ["now", "usage yesterday", "series Water Heater today"] {
+            let text = {
+                let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+                dynamo_reply(&argv)
+            };
+            assert!(text.contains("-04:00"), "`{line}` is not stamped local");
+            assert!(!text.contains("+00:00"), "`{line}` is stamped UTC");
+            assert!(
+                text.contains("2026-08-01") || text.contains("2026-07-31"),
+                "`{line}` is dated off the suite's fixed clock:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_name_is_ambiguous_and_the_candidates_include_a_circuit_and_its_legs() {
+        let reply = dynamo("series geothermal today");
+        assert_eq!(reply["error"], "ambiguous");
+        let candidates = reply["candidates"].as_array().expect("candidates");
+        let heat_pump = candidates
+            .iter()
+            .filter(|c| c["circuit"] == "GeoThermal")
+            .count();
+        // The merged channel and its two legs, all under one name. Picking a
+        // leg is exactly half the answer and reads like a whole one.
+        assert_eq!(heat_pump, 3, "a 240 V circuit appears three times");
+    }
+
+    #[test]
+    fn a_weeks_readings_are_longer_than_the_cap_and_lose_their_figures_to_it() {
+        // The size of the real thing — `series "Water Heater" week` is 9,355
+        // bytes against `MAX_OUTPUT` of 8,000 — and the reason the fixture is
+        // built rather than written out.
+        let raw = dynamo_reply(&[
+            "series".to_string(),
+            "Water Heater".to_string(),
+            "week".to_string(),
+        ]);
+        assert!(
+            raw.chars().count() > crate::model::dynamo::MAX_OUTPUT,
+            "a week of hourly readings has to overflow the cap, it is {} chars",
+            raw.chars().count()
+        );
+
+        let cut = crate::model::tools::framed(
+            &raw,
+            crate::model::dynamo::MAX_OUTPUT,
+            crate::model::dynamo::note_for(&raw),
+        );
+        // Dynamo sorts its keys, so the figures are behind the rows and go
+        // first. This asserts the trap is real before asserting the fix works.
+        let rows_only: String = raw.chars().take(crate::model::dynamo::MAX_OUTPUT).collect();
+        assert!(
+            !rows_only.contains("total_kwh"),
+            "the cut has to lose the total"
+        );
+        // And the note puts it back, after the cut rather than inside it.
+        assert!(
+            cut.contains("119.27"),
+            "the model never sees the total:\n{cut}"
+        );
+    }
+
+    #[test]
+    fn what_usage_says_about_a_circuit_is_what_series_says_about_it() {
+        // The real tool is consistent — `usage month` and `series <circuit>
+        // month` agree to the decimal, because they are the same sum. A fixture
+        // where they disagree scores the model on a discrepancy that exists
+        // only in this file, and one did: 511.2 against 568.9 failed two
+        // scenarios six times each, and both traces were right.
+        for (period, circuit) in [
+            ("yesterday", "Water Heater"),
+            ("month", "Water Heater"),
+            ("yesterday", "basement (blank) ch3"),
+        ] {
+            let from_usage = kwh_rows(&dynamo(&format!("usage {period}")))
+                .into_iter()
+                .find(|(name, _)| name == circuit)
+                .unwrap_or_else(|| panic!("{circuit} is not in `usage {period}`"))
+                .1;
+            let from_series = dynamo(&format!("series {circuit} {period}"))["total_kwh"]
+                .as_f64()
+                .expect("a total");
+            assert!(
+                (from_usage - from_series).abs() < 0.01,
+                "`usage {period}` says {circuit} used {from_usage} and \
+                 `series {circuit} {period}` says {from_series}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_month_is_a_page_of_rows_whose_total_is_still_the_whole_month() {
+        // Dynamo's own paging, and the part a model is likely to hedge for no
+        // reason: 400 rows of 706 came back, and 569.47 kWh is the month.
+        let reply = dynamo("series Water Heater month");
+        assert_eq!(reply["truncated"], true);
+        assert_eq!(reply["count"], 400);
+        assert_eq!(reply["matched"], 706);
+        assert_eq!(reply["total_kwh"], 569.47);
+    }
+
+    #[test]
+    fn asking_for_minutes_over_a_month_quietly_answers_for_a_week() {
+        // The worst thing this tool does, and it was measured rather than
+        // imagined: minute readings are kept for about a week, so a month at
+        // `scale=1MIN` answers from the last week and still labels itself "the
+        // last 30 days". Against the real house that is 135.449 kWh where the
+        // same question at the resolution Dynamo picks is 569.47 — four times
+        // out, for a plainly-worded question, with nothing saying so.
+        let trap = dynamo("series Water Heater month scale=1MIN");
+        let honest = dynamo("series Water Heater month");
+        assert_eq!(
+            trap["period"], honest["period"],
+            "both claim the same period"
+        );
+        let short = trap["total_kwh"].as_f64().expect("a total");
+        let whole = honest["total_kwh"].as_f64().expect("a total");
+        assert!(
+            short < whole / 3.0,
+            "the trap has to be worth catching: {short} against {whole}"
+        );
+        // The only thing in the reply that gives it away, and it is inside the
+        // array that got cut.
+        assert!(
+            trap["points"][0]["at"]
+                .as_str()
+                .expect("a timestamp")
+                .starts_with("2026-07-25"),
+            "the window starts a week back, not thirty days"
+        );
+        // So the note has to say it.
+        let raw = dynamo_reply(&[
+            "series".to_string(),
+            "Water Heater".to_string(),
+            "month".to_string(),
+            "scale=1MIN".to_string(),
+        ]);
+        let note = crate::model::dynamo::note_for(&raw).expect("a note");
+        assert!(note.contains("about a week"), "{note}");
+    }
+
+    #[test]
+    fn a_scale_dynamo_does_not_have_is_refused_rather_than_ignored() {
+        // A real run wrote `scale=1M`. The fixture that shrugged and answered
+        // for *today* had the model reporting a day under a question about a
+        // month, and reasoning sensibly about a refusal that never happened.
+        let reply = dynamo("series Water Heater month scale=1M");
+        assert_eq!(reply["ok"], false);
+        assert!(reply["message"]
+            .as_str()
+            .expect("a message")
+            .contains("1MIN"));
+        // And the four it does have are accepted.
+        for scale in ["1MIN", "15MIN", "1H", "1D"] {
+            assert_eq!(
+                dynamo(&format!("series Water Heater today scale={scale}"))["ok"],
+                true,
+                "scale={scale} is real"
+            );
+        }
+    }
+
+    #[test]
+    fn a_series_answers_for_the_period_it_was_asked_for() {
+        // The gap that made a scenario unscoreable: every period that was not
+        // spelled exactly right fell through to `today`, so the model was
+        // handed a day's readings under a question about a month and marked
+        // down for what it made of them.
+        for (asked, expected) in [
+            ("today", "today"),
+            ("yesterday", "yesterday"),
+            ("week", "the last 7 days"),
+            ("month", "the last 30 days"),
+            ("year", "the last year"),
+        ] {
+            assert_eq!(
+                dynamo(&format!("series Water Heater {asked}"))["period"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_period_dynamo_does_not_have_is_refused_with_the_ones_it_does() {
+        let reply = dynamo("usage july");
+        assert_eq!(reply["ok"], false);
+        let message = reply["message"].as_str().expect("a message");
+        assert!(
+            message.contains("yesterday") && message.contains("month"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_long_period_comes_back_as_daily_rolls_and_says_so() {
+        assert_eq!(dynamo("usage year")["resolution"], "1D");
+        assert_eq!(dynamo("usage month")["resolution"], "1H");
+        assert_eq!(dynamo("usage yesterday")["resolution"], "1MIN");
+    }
+
+    #[test]
+    fn nothing_in_this_house_is_called_a_boiler() {
+        assert_eq!(dynamo("series boiler today")["error"], "no-such-circuit");
+        assert_eq!(dynamo("series dishwasher week")["error"], "no-such-circuit");
+    }
+
+    #[test]
+    fn every_reply_this_fixture_gives_is_json_the_app_would_accept() {
+        // `note_for` parses the response, and a fixture with a stray comma is a
+        // scenario silently scored without the note that ships with it.
+        for line in [
+            "describe",
+            "channels",
+            "now",
+            "usage today",
+            "usage yesterday",
+            "usage yesterday kind=merged",
+            "usage yesterday kind=branch",
+            "usage yesterday kind=main",
+            "usage week",
+            "usage month",
+            "usage year",
+            "series Water Heater today",
+            "series Refrigerator today",
+            "series basement (blank) ch3 yesterday",
+            "series kitchen today",
+            "series geothermal today",
+            "series boiler today",
+            "usage july",
+        ] {
+            dynamo(line);
+        }
+        serde_json::from_str::<serde_json::Value>(DYNAMO_NOW_SILENT).expect("the silent panel");
     }
 }
