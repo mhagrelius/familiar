@@ -317,6 +317,7 @@ dependencies = [
 [[package]]
 name = "earshot"
 version = "0.1.0"
+source = "git+https://github.com/mhagrelius/earshot?rev=33f2cc95b26268f3d40cd74e36d56b5e347c42e3#33f2cc95b26268f3d40cd74e36d56b5e347c42e3"
 dependencies = [
  "gio",
  "glib",

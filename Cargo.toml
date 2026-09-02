@@ -56,7 +56,7 @@ brain = { git = "https://github.com/mhagrelius/brain", rev = "52288a939cd735d24c
 # answers is the one that matters, and speech must not compete with it. Parakeet
 # int8 runs on the CPU at roughly 48x real time and asks the GPU for nothing.
 # `parakeet-rs` and its release-candidate `ort` are pinned in there.
-earshot = { path = "../earshot" }
+earshot = { git = "https://github.com/mhagrelius/earshot", rev = "33f2cc95b26268f3d40cd74e36d56b5e347c42e3" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Timestamps on turns and threads, and the volatile date line in the prompt.
